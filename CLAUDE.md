@@ -70,8 +70,12 @@ s:\vibe-sandbox\.venv\Scripts\vibe-trading.exe connector check   # verify broker
 
 ## Git workflow
 
-- `main` is always green. Never commit directly to `main`.
-- One branch per phase: `phase/NN-short-name` (e.g. `phase/04-strategies`).
+- `develop` is the integration branch. Every phase branch is cut from `develop` and merged
+  back into `develop`. **Phase branches never merge into `main`.**
+- `main` receives exactly one merge from `develop`, at the end of the build. Until then it
+  is deliberately behind and is not expected to run.
+- Never commit directly to `main`. Both `develop` and `main` stay green.
+- One branch per phase: `phase/NN-short-name` (e.g. `phase/04-strategies`), cut from `develop`.
 - Conventional commits: `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`.
 - Before any merge: run the full test suite, then show me the diff summary and wait for my
   approval. Do not merge on your own initiative.
