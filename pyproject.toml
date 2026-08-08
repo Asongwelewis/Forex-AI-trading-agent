@@ -1,0 +1,44 @@
+[project]
+name = "fx-regime-agent"
+version = "0.1.0"
+description = "Session-aware forex regime agent: three uncorrelated strategies behind a regime router, executing only under an expiring permission grant."
+readme = "README.md"
+# pandas-ta dropped 3.11 support, so the plan's "3.11+" is no longer satisfiable.
+# Upper bound excludes 3.13+, where several deps still lag (see docs/BUILD_PLAN.md pre-flight).
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "pandas>=2.2",
+    "pandas-ta>=0.3.14b0",
+    "numpy>=1.26",
+    "pydantic>=2",
+    "python-dotenv>=1.0",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+# MetaTrader5 is Windows-only and needs a running terminal. Install with:
+#   uv sync --extra mt5
+mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+# Not an installable distribution — modules are run in-tree (`python -m src.main`).
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
