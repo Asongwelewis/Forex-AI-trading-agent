@@ -11,14 +11,14 @@ from pathlib import Path
 import pytest
 
 PACKAGES = [
-    "src",
-    "src.adapters",
-    "src.strategies",
-    "src.regime",
-    "src.risk",
-    "src.permission",
-    "src.journal",
-    "src.llm",
+    "fxagent",
+    "fxagent.adapters",
+    "fxagent.strategies",
+    "fxagent.regime",
+    "fxagent.risk",
+    "fxagent.permission",
+    "fxagent.journal",
+    "fxagent.llm",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

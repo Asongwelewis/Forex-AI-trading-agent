@@ -28,7 +28,8 @@ Detailed phased build steps and prompts: `docs/BUILD_PLAN.md` — read it when s
 
 ## Stack
 
-- Python 3.11+ (`uv` for env management, NOT pip directly into system Python)
+- Python 3.12 (`uv` for env management, NOT pip directly into system Python). Not 3.11 —
+  `pandas-ta` dropped it. Not 3.13+ — several deps still lag.
 - `vibe-trading-ai` — broker connectors, backtest engines, data loaders, mandate/kill-switch
 - MetaTrader 5 + Exness demo — execution and price data
 - pandas, pandas-ta, numpy — deterministic strategy layer
@@ -39,26 +40,32 @@ Detailed phased build steps and prompts: `docs/BUILD_PLAN.md` — read it when s
 
 ## Project structure
 
-- `src/adapters/` — `BrokerAdapter` protocol + `MT5LocalAdapter`, `MetaApiAdapter`
-- `src/strategies/` — the three strategies, each a `Strategy` subclass returning a `Signal`
-- `src/regime/` — session clock, volatility/trend classification, strategy weighting
-- `src/risk/` — position sizing, exposure caps
-- `src/permission/` — grant state machine, auto-revoke triggers
-- `src/journal/` — SQLite signal + outcome logging
-- `src/llm/` — provider gateway, prompt templates, Pydantic response schemas
-- `tests/` — mirrors `src/` structure
-- `docs/` — BUILD_PLAN.md and design notes
+Our package is `fxagent/`, **not** `src/`. `vibe-trading-ai` installs unnamespaced top-level
+`src`, `cli`, and `backtest` packages into site-packages, so `src/` would collide with it the
+moment the two share an environment. Never reintroduce a top-level `src/` here.
+
+- `fxagent/adapters/` — `BrokerAdapter` protocol + `MT5LocalAdapter`, `MetaApiAdapter`
+- `fxagent/strategies/` — the three strategies, each a `Strategy` subclass returning a `Signal`
+- `fxagent/regime/` — session clock, volatility/trend classification, strategy weighting
+- `fxagent/risk/` — position sizing, exposure caps
+- `fxagent/permission/` — grant state machine, auto-revoke triggers
+- `fxagent/journal/` — SQLite signal + outcome logging
+- `fxagent/llm/` — provider gateway, prompt templates, Pydantic response schemas
+- `tests/` — mirrors `fxagent/` structure
+- `docs/` — BUILD_PLAN.md, PHASE1_FINDINGS.md, and design notes
 
 ## Commands
 
 ```bash
 uv run pytest                      # full test suite
 uv run pytest tests/strategies -v  # scoped
-uv run ruff check src tests        # lint
-uv run ruff format src tests       # format
-uv run python -m src.main --dry-run  # one analysis cycle, no orders
-vibe-trading provider doctor       # diagnose LLM provider issues
-vibe-trading connector check       # verify broker connection
+uv run ruff check fxagent tests    # lint
+uv run ruff format fxagent tests   # format
+uv run python -m fxagent.main --dry-run  # one analysis cycle, no orders
+
+# vibe-trading-ai lives in an isolated sandbox at ../vibe-sandbox, never in this venv.
+s:\vibe-sandbox\.venv\Scripts\vibe-trading.exe provider doctor   # diagnose LLM provider
+s:\vibe-sandbox\.venv\Scripts\vibe-trading.exe connector check   # verify broker connection
 ```
 
 ## Git workflow
@@ -110,5 +117,5 @@ Log every disagreement — it is training data, not noise.
 - Prefer small, pure functions over classes with mutable state.
 - Type hints everywhere. `from __future__ import annotations` at the top of every module.
 - Tests for every strategy and every risk calculation. Untested risk code is a defect.
-- No print statements in `src/` — use the `logging` module.
+- No print statements in `fxagent/` — use the `logging` module.
 - When you are uncertain about a financial convention, ask me rather than guessing.

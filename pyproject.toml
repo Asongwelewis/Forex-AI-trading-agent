@@ -8,9 +8,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    "pandas>=2.2",
-    "pandas-ta>=0.3.14b0",
-    "numpy>=1.26",
+    # Ceiling is vibe-trading-ai's (`pandas<3.0.0`); floor is pandas-ta's (`>=2.3.2`).
+    # Pinned now so Phase 4 indicator code is written against the version we'll actually ship.
+    "pandas>=2.3.2,<3",
+    "pandas-ta>=0.4.71b0",
+    "numpy>=2.2.6",
     "pydantic>=2",
     "python-dotenv>=1.0",
     "apscheduler>=3.10",
@@ -28,9 +30,15 @@ dev = [
     "ruff>=0.6",
 ]
 
-[tool.uv]
-# Not an installable distribution — modules are run in-tree (`python -m src.main`).
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# A real installed distribution, not a sys.path accident. `import fxagent` then resolves
+# by installed-package name and can never be shadowed by cwd ordering or by a colliding
+# top-level package from another distribution.
+packages = ["fxagent"]
 
 [tool.ruff]
 line-length = 100
@@ -41,4 +49,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# `caio` (a vibe-trading-ai transitive dep) ships a top-level `tests` package.
+# importlib mode resolves test modules by path instead of by sys.path order,
+# so a shared environment can never shadow ours.
+addopts = "-q --import-mode=importlib"

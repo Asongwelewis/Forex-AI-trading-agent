@@ -137,7 +137,7 @@ This answer determines whether cloud hosting is possible later. Write it down.
 ```
 Create a new branch: phase/02-broker-adapter
 
-Implement src/adapters/base.py containing a BrokerAdapter Protocol (typing.Protocol) with
+Implement fxagent/adapters/base.py containing a BrokerAdapter Protocol (typing.Protocol) with
 these methods, all fully type-hinted, all returning Pydantic models defined in the same module:
 
 - get_bars(symbol: str, timeframe: str, count: int) -> BarSeries
@@ -151,7 +151,7 @@ IMPORTANT: OrderRequest MUST require stop_loss and take_profit as non-optional f
 structurally impossible to construct an order without them. Add a Pydantic validator that
 rejects a stop_loss on the wrong side of the entry price.
 
-Also create src/adapters/mock.py — a MockAdapter implementing the protocol against synthetic
+Also create fxagent/adapters/mock.py — a MockAdapter implementing the protocol against synthetic
 data, so strategies can be tested without MT5 running.
 
 Write tests covering: the SL-side validator rejects bad input, MockAdapter satisfies the
@@ -172,7 +172,7 @@ Run pytest and ruff. Show me the diff summary, then wait for my approval before 
 ```
 Create branch phase/03-mt5-adapter.
 
-Implement src/adapters/mt5_local.py — MT5LocalAdapter implementing BrokerAdapter using the
+Implement fxagent/adapters/mt5_local.py — MT5LocalAdapter implementing BrokerAdapter using the
 MetaTrader5 Python package.
 
 Requirements:
@@ -221,7 +221,7 @@ Merge phase/03-mt5-adapter into main with --no-ff, delete the branch, and push.
 ```
 Create branch phase/04-strategies.
 
-Implement src/strategies/. First create base.py with:
+Implement fxagent/strategies/. First create base.py with:
 - A Signal Pydantic model: symbol, direction (LONG/SHORT/FLAT), confidence (0-1),
   entry_price, stop_loss, take_profit, strategy_name, timestamp (UTC), and a
   reasoning: dict field for structured diagnostics.
@@ -267,7 +267,7 @@ fails. That negative test matters more than the positive one.
 ```
 Create branch phase/05-regime-router.
 
-Implement src/regime/:
+Implement fxagent/regime/:
 
 1. sessions.py — pure functions mapping a UTC datetime to the active session(s):
    TOKYO (00-09), LONDON (08-17), NEW_YORK (13-22), OVERLAP (13-17). Handle the Friday
@@ -313,7 +313,7 @@ check them against the session table in `CLAUDE.md`.
 ```
 Create branch phase/06-risk-and-permission.
 
-Part A — src/risk/sizing.py:
+Part A — fxagent/risk/sizing.py:
 - position_size(account_equity, risk_fraction, entry, stop_loss, symbol_spec) -> volume
   computed from stop distance in risk units, NOT fixed lots. Must handle JPY pairs and
   account-currency conversion correctly.
@@ -321,7 +321,7 @@ Part A — src/risk/sizing.py:
 - total_open_risk(positions) and a check that rejects a new trade pushing total risk above 2%.
 - Round volume down to the symbol's lot step, never up. Reject if below minimum lot.
 
-Part B — src/permission/grant.py:
+Part B — fxagent/permission/grant.py:
 A PermissionGrant Pydantic model with: allowed_symbols, max_trades, max_notional,
 expires_at (UTC), granted_at, and a revoked flag with revocation reason.
 
@@ -355,7 +355,7 @@ this to place a trade I didn't authorize?" If Claude can't answer convincingly, 
 ```
 Create branch phase/07-backtest.
 
-Build src/backtest/ that replays historical MT5 bars through the full pipeline —
+Build fxagent/backtest/ that replays historical MT5 bars through the full pipeline —
 strategies, regime router, consensus, risk sizing — and records results.
 
 Cost model requirements (IMPORTANT — a backtest without these is invalid):
@@ -370,7 +370,7 @@ trade count, and a per-strategy breakdown so I can see which of the three is car
 Implement walk-forward validation: split the period into N folds, and report out-of-sample
 metrics separately from in-sample. Report BOTH. Never report a single in-sample number.
 
-Add a CLI: uv run python -m src.backtest --symbol EURUSD --from 2024-01-01 --to 2025-12-31
+Add a CLI: uv run python -m fxagent.backtest --symbol EURUSD --from 2024-01-01 --to 2025-12-31
 Output a summary table to stdout and write full trade-by-trade results to CSV.
 
 Run it on EURUSD H1 and show me the out-of-sample results.
@@ -390,16 +390,16 @@ re-run. Resist the urge to search parameter space until the number looks good.
 ```
 Create branch phase/08-journal-and-alerts.
 
-1. src/journal/ — SQLite store logging every consensus evaluation (including the ones that
+1. fxagent/journal/ — SQLite store logging every consensus evaluation (including the ones that
    produced no signal), the full diagnostics dict, whether a trade was taken, and the outcome
    once closed. Use a migration-friendly schema. Add a repository class, not raw SQL scattered
    through the codebase.
 
-2. A Streamlit dashboard at src/dashboard/app.py showing: current regime and session, each
+2. A Streamlit dashboard at fxagent/dashboard/app.py showing: current regime and session, each
    strategy's latest vote, open positions, current grant state with countdown to expiry,
    equity curve from the journal, and a table of recent signals with outcomes.
 
-3. src/alerts/telegram.py — send a signal card to Telegram with inline Approve/Reject buttons.
+3. fxagent/alerts/telegram.py — send a signal card to Telegram with inline Approve/Reject buttons.
    On approve, place the order through the adapter; on reject, log the rejection with reason.
    Read TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from env. Verify the sender chat ID matches
    the configured one and ignore messages from anyone else.
@@ -421,7 +421,7 @@ logs correctly.
 ```
 Create branch phase/09-llm-synthesis.
 
-Build src/llm/:
+Build fxagent/llm/:
 
 1. gateway.py — a provider-agnostic client. Primary: Google Gemini free tier. Fallback: Groq.
    On rate limit or error, fall through automatically and log which provider served the call.
@@ -454,7 +454,7 @@ None, schema violation returns None, and the fallback provider is used when prim
 ```
 Create branch phase/10-runner.
 
-Build src/main.py — an APScheduler loop that wakes on a schedule keyed to UTC session times,
+Build fxagent/main.py — an APScheduler loop that wakes on a schedule keyed to UTC session times,
 runs one full analysis cycle per configured symbol, writes to the journal, and either sends a
 Telegram card (ADVISORY) or places an order (GRANTED). Add --dry-run to skip all side effects.
 
