@@ -192,6 +192,21 @@ def test_filling_mode_respects_what_the_symbol_supports(allowed: int, expected_a
     assert chosen == int(getattr(mt5, expected_attr))
 
 
+def test_filling_mode_is_decoded_as_a_mask_not_a_value() -> None:
+    """Exness EURUSDm reports 3, which is not a valid ORDER_FILLING_* value at all."""
+    import MetaTrader5 as mt5
+
+    assert _filling_mode(mt5, SimpleNamespace(filling_mode=3)) != 3
+
+
+def test_filling_mode_refuses_a_symbol_allowing_neither_ioc_nor_fok() -> None:
+    """ORDER_FILLING_RETURN is invalid for TRADE_ACTION_DEAL; sending it guarantees a reject."""
+    import MetaTrader5 as mt5
+
+    with pytest.raises(MT5ConnectionError, match="neither IOC nor FOK"):
+        _filling_mode(mt5, SimpleNamespace(filling_mode=0))
+
+
 # --- configuration ------------------------------------------------------------
 
 
@@ -308,3 +323,117 @@ def test_disconnect_shuts_the_terminal_down_and_is_idempotent() -> None:
     adapter.disconnect()
 
     assert fake.shutdown_calls == 1
+
+
+# --- offset detection needs a LIVE quote --------------------------------------
+#
+# Offset and staleness are the same number seen from one tick, so detection cannot be
+# tested by asserting an offset alone: every case below fixes the broker offset AND the
+# quote age independently, and checks that a quote no timezone explains is refused.
+
+
+class FakeQuoteMT5(FakeMT5):
+    """FakeMT5 that also serves a quote, so offset detection can run against it."""
+
+    def __init__(self, *, tick_epoch: int | None, selectable: bool = True) -> None:
+        super().__init__(login=12345678, trade_mode=FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+        self._tick_epoch = tick_epoch
+        self._selectable = selectable
+        self.selected: list[str] = []
+
+    def symbol_select(self, symbol: str, enable: bool) -> bool:  # noqa: FBT001
+        self.selected.append(symbol)
+        return self._selectable
+
+    def symbol_info_tick(self, symbol: str) -> SimpleNamespace | None:
+        return None if self._tick_epoch is None else SimpleNamespace(time=self._tick_epoch)
+
+
+def _detecting_adapter(
+    *,
+    broker_offset: timedelta,
+    quote_age: timedelta,
+    selectable: bool = True,
+    configured_offset: str | None = None,
+) -> tuple[MT5LocalAdapter, FakeQuoteMT5]:
+    """Adapter whose broker clock sits at `broker_offset` and whose quote is `quote_age` old."""
+    broker_wall_clock = datetime.now(UTC) + broker_offset - quote_age
+    fake = FakeQuoteMT5(tick_epoch=int(broker_wall_clock.timestamp()), selectable=selectable)
+
+    env = {**ENV, "MT5_SYMBOL_SUFFIX": "m"}
+    if configured_offset is not None:
+        env["MT5_SERVER_UTC_OFFSET_HOURS"] = configured_offset
+    adapter = MT5LocalAdapter.from_env(env)
+    adapter._mt5 = fake  # type: ignore[assignment]
+    return adapter, fake
+
+
+@pytest.mark.parametrize("hours", [0, 2, 3, -5])
+def test_a_live_quote_yields_the_real_broker_offset(hours: int) -> None:
+    adapter, _ = _detecting_adapter(
+        broker_offset=timedelta(hours=hours), quote_age=timedelta(seconds=2)
+    )
+    assert adapter._resolve_server_offset() == timedelta(hours=hours)
+
+
+def test_stale_quote_is_rejected_instead_of_being_read_as_a_timezone() -> None:
+    """This is the regression: an 11h17m-old quote used to snap to -11:30 and be accepted."""
+    adapter, _ = _detecting_adapter(
+        broker_offset=timedelta(0), quote_age=timedelta(hours=11, minutes=17)
+    )
+    with pytest.raises(MT5ConnectionError, match="stale"):
+        adapter._resolve_server_offset()
+
+
+def test_stale_quote_error_names_the_measured_lag() -> None:
+    adapter, _ = _detecting_adapter(broker_offset=timedelta(0), quote_age=timedelta(minutes=13))
+    with pytest.raises(MT5ConnectionError, match=r"13\.0 minutes"):
+        adapter._resolve_server_offset()
+
+
+def test_a_quote_lag_inside_the_tolerance_is_accepted() -> None:
+    """Real quotes lag by seconds; that must not be mistaken for staleness."""
+    adapter, _ = _detecting_adapter(broker_offset=timedelta(0), quote_age=timedelta(seconds=5))
+    assert adapter._resolve_server_offset() == timedelta(0)
+
+
+def test_grid_aligned_staleness_is_a_known_blind_spot() -> None:
+    """KNOWN LIMIT, asserted so it cannot regress silently into a surprise.
+
+    A quote exactly 11h old is arithmetically identical to a live quote from a UTC-11
+    broker — one tick carries no information that separates them. Only an external market
+    calendar can, and that belongs to the Phase 5 session clock, not to this adapter.
+    Realistic staleness is not grid-aligned and IS caught; see the test above.
+    """
+    adapter, _ = _detecting_adapter(broker_offset=timedelta(0), quote_age=timedelta(hours=11))
+    assert adapter._resolve_server_offset() == timedelta(hours=-11)
+
+
+def test_detection_selects_the_symbol_before_quoting_it() -> None:
+    adapter, fake = _detecting_adapter(broker_offset=timedelta(0), quote_age=timedelta(seconds=2))
+    adapter._resolve_server_offset()
+    assert fake.selected == ["EURUSDm"]
+
+
+def test_unavailable_reference_symbol_points_at_the_suffix() -> None:
+    adapter, _ = _detecting_adapter(
+        broker_offset=timedelta(0), quote_age=timedelta(seconds=2), selectable=False
+    )
+    with pytest.raises(MT5ConnectionError, match="MT5_SYMBOL_SUFFIX"):
+        adapter._resolve_server_offset()
+
+
+def test_missing_quote_is_reported_without_a_traceback_from_none() -> None:
+    adapter, _ = _detecting_adapter(broker_offset=timedelta(0), quote_age=timedelta(seconds=2))
+    adapter._mt5._tick_epoch = None  # type: ignore[union-attr]
+    with pytest.raises(MT5ConnectionError, match="cannot read a quote"):
+        adapter._resolve_server_offset()
+
+
+def test_a_configured_zero_offset_skips_detection_rather_than_being_falsy() -> None:
+    """UTC+0 is the weekend escape hatch; `timedelta(0)` is falsy and must still short-circuit."""
+    adapter, fake = _detecting_adapter(
+        broker_offset=timedelta(0), quote_age=timedelta(days=3), configured_offset="0"
+    )
+    assert adapter._resolve_server_offset() == timedelta(0)
+    assert fake.selected == []

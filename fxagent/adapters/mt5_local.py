@@ -6,10 +6,12 @@ package is imported lazily so this module stays importable — and testable — 
 Three things here are easy to get wrong and are handled explicitly:
 
 **Server time is not UTC.** MT5 reports bar and tick times on the *broker's* clock,
-encoded as if it were a Unix timestamp. Exness servers typically run GMT+2/+3, so taking
-those values at face value would shift every timestamp by hours and silently corrupt the
-session logic in Phase 5. The offset is detected on connect, or set explicitly via
-`MT5_SERVER_UTC_OFFSET_HOURS`, and subtracted from every timestamp we return.
+encoded as if it were a Unix timestamp. Taking those values at face value would shift every
+timestamp by hours and silently corrupt the session logic in Phase 5. The offset is detected
+on connect, or set explicitly via `MT5_SERVER_UTC_OFFSET_HOURS`, and subtracted from every
+timestamp we return. Detection needs a *live* quote: offset and staleness are the same
+measurement seen from one tick, so a quote that no timezone explains is rejected rather than
+read as a timezone. Do not assume a value per broker — read the clock in Market Watch.
 
 **numpy scalars are not Python scalars.** `copy_rates_*` returns a structured array whose
 fields are `numpy.float64` / `numpy.uint64`. Those do not serialise to JSON, so every value
@@ -47,6 +49,15 @@ MAX_PLAUSIBLE_OFFSET = timedelta(hours=14)
 
 #: Server offsets are whole or half hours; detection snaps to this grid.
 OFFSET_GRANULARITY = timedelta(minutes=30)
+
+#: How far a quote may sit from the nearest half-hour offset before detection refuses it.
+#:
+#: A single tick cannot separate "the broker clock is two hours ahead" from "this quote is
+#: two hours old" — they are the same number. What it *can* show is a quote landing nowhere
+#: near a half-hour boundary, because no timezone explains that; such a quote is stale and
+#: the offset read from it would shift every timestamp we return. Must stay far below half
+#: of OFFSET_GRANULARITY, or a genuine offset would be rejected as staleness.
+MAX_QUOTE_LAG = timedelta(seconds=30)
 
 
 class MT5Error(RuntimeError):
@@ -121,6 +132,12 @@ def _snap_offset(delta: timedelta) -> timedelta:
     """Round a raw clock difference to the nearest half hour."""
     units = round(delta / OFFSET_GRANULARITY)
     return OFFSET_GRANULARITY * units
+
+
+def _describe_lag(lag: timedelta) -> str:
+    """Render a quote lag as an operator reads it: seconds when small, minutes when not."""
+    seconds = abs(lag.total_seconds())
+    return f"{seconds:.1f}s" if seconds < 120 else f"{seconds / 60:.1f} minutes"
 
 
 class MT5LocalAdapter:
@@ -304,23 +321,38 @@ class MT5LocalAdapter:
             return self._configured_offset
 
         mt5 = self._terminal()
-        symbol = self._broker_symbol(self._reference_symbol)
+        symbol = self._select(self._reference_symbol)
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
             raise MT5ConnectionError(
-                f"cannot read {symbol} to detect the server time offset. Check the symbol "
-                "name in Market Watch (Exness suffixes symbols, e.g. EURUSDm — set "
-                "MT5_SYMBOL_SUFFIX), or set MT5_SERVER_UTC_OFFSET_HOURS explicitly."
+                f"cannot read a quote for {symbol} to detect the server time offset. Set "
+                "MT5_SERVER_UTC_OFFSET_HOURS explicitly to skip detection."
             )
 
         raw = datetime.fromtimestamp(int(tick.time), UTC) - datetime.now(UTC)
         offset = _snap_offset(raw)
         if abs(offset) > MAX_PLAUSIBLE_OFFSET:
             raise MT5ConnectionError(
-                f"detected an implausible server time offset of {offset}. The last quote is "
-                "probably stale because the market is closed. Set "
-                "MT5_SERVER_UTC_OFFSET_HOURS explicitly (Exness demo is usually 2 or 3)."
+                f"detected an implausible server time offset of {offset} from the last "
+                f"{symbol} quote. The quote is stale, most likely because the market is "
+                "closed. Set MT5_SERVER_UTC_OFFSET_HOURS explicitly — read the clock in the "
+                "terminal's Market Watch rather than assuming a value for the broker."
             )
+
+        lag = offset - raw
+        if abs(lag) > MAX_QUOTE_LAG:
+            raise MT5ConnectionError(
+                f"the last {symbol} quote is {_describe_lag(lag)} away from the nearest "
+                f"half-hour offset ({offset}), more than the {_describe_lag(MAX_QUOTE_LAG)} "
+                "allowed. No timezone explains that gap, so the quote is stale and any offset "
+                "inferred from it would shift every timestamp. The market is most likely "
+                "closed. Reconnect when it is open, or set MT5_SERVER_UTC_OFFSET_HOURS "
+                "explicitly to skip detection."
+            )
+
+        logger.debug(
+            "detected server offset %s from %s (quote lag %s)", offset, symbol, _describe_lag(lag)
+        )
         return offset
 
     @property
@@ -542,12 +574,24 @@ def _mt5_timeframe(mt5: ModuleType, timeframe: str) -> int:
 def _filling_mode(mt5: ModuleType, info: Any) -> int:
     """Pick a filling mode the symbol actually supports.
 
-    Hardcoding IOC or FOK is a common source of "unsupported filling mode" rejections;
-    brokers differ per symbol.
+    `symbol_info().filling_mode` is a *bitmask* of permitted modes, not a single value —
+    Exness EURUSDm reports 3, meaning FOK and IOC are both allowed. Passing that 3 straight
+    through as `type_filling` would be rejected outright, because the two numbering schemes
+    do not line up: the mask runs FOK=1, IOC=2, while the `ORDER_FILLING_*` enum sent back
+    in the request runs FOK=0, IOC=1, RETURN=2.
+
+    The 1 and 2 below are written as literals because the MetaTrader5 package ships no
+    `SYMBOL_FILLING_FOK` / `SYMBOL_FILLING_IOC` constants to name them (confirmed absent on
+    5.0.6090); they are the MQL5 `SYMBOL_FILLING_MODE` flags.
     """
     allowed = int(info.filling_mode)
-    if allowed & 2:
+    if allowed & 2:  # SYMBOL_FILLING_IOC — accepts a partial fill
         return int(mt5.ORDER_FILLING_IOC)
-    if allowed & 1:
+    if allowed & 1:  # SYMBOL_FILLING_FOK — all or nothing
         return int(mt5.ORDER_FILLING_FOK)
-    return int(mt5.ORDER_FILLING_RETURN)
+    raise MT5ConnectionError(
+        f"symbol reports filling_mode={allowed}, which permits neither IOC nor FOK. "
+        "ORDER_FILLING_RETURN is not valid for TRADE_ACTION_DEAL, so there is no filling "
+        "mode we can legally send — refusing to place an order that the broker would "
+        "reject. Check the symbol's trade settings in Market Watch."
+    )
