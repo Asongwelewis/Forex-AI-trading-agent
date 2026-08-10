@@ -29,7 +29,9 @@ Claude Code cannot get these for you. Have them in a scratch file (not in the re
 - [ ] Exness demo account: login number, password, server name (e.g. `Exness-MT5Trial9`)
 - [ ] Google AI Studio API key — free, no card: https://aistudio.google.com/apikey
 - [ ] Groq API key (fallback) — free, no card: https://console.groq.com/keys
-- [ ] Finnhub API key (economic calendar) — free tier: https://finnhub.io/register
+- [ ] ~~Finnhub API key~~ — NOT NEEDED. Dropped in the Phase 5 teardown. `/calendar/economic`
+      is premium and returns HTTP 403 on a free key (verified 2026-08-10), and no code ever
+      called Finnhub. The calendar comes from Forex Factory's keyless weekly feed — see Phase 6.
 - [ ] Telegram bot token + your chat ID (Phase 8 — skip for now if short on time)
 - [ ] GitHub account with a new **private** empty repo created
 
@@ -332,6 +334,39 @@ A GrantManager state machine with states ADVISORY / GRANTED / REVOKED and these 
 - Auto-revoke triggers, each producing a logged reason: daily loss exceeds 3% of starting
   equity, spread exceeds 3x its 20-period median, high-impact calendar event within 15
   minutes, three consecutive losses, broker heartbeat lost for >60s.
+Part C — fxagent/calendar/: the economic calendar behind the "high-impact event within 15
+minutes" auto-revoke. Write it ourselves; vibe-trading's Finnhub loader is US-equity
+dailies only.
+
+Finnhub's /calendar/economic is PREMIUM — verified 2026-08-10, it returns HTTP 403
+{"error":"You don't have access to this resource."} on our free key, while /quote,
+/calendar/earnings, /calendar/ipo and /country all return 200 on the same key. Do not
+retry it. Use Forex Factory's weekly JSON feed:
+
+  https://nfs.faireconomy.media/ff_calendar_thisweek.json
+
+Verified live: HTTP 200, a JSON array of 74 events, fields exactly
+{title, country, date, impact, forecast, previous}. Five things about it that will
+otherwise bite:
+
+1. `date` is ISO 8601 carrying a -04:00 offset (US Eastern), NOT UTC. Parse with
+   datetime.fromisoformat and .astimezone(UTC) immediately. Never strip the offset — it
+   shifts with US DST, and a 15-minute revoke window computed an hour out is worse than
+   no window at all.
+2. `country` holds a CURRENCY code (USD, EUR, JPY, GBP, AUD, NZD, CAD, CHF, CNY), not a
+   country. Match it against both legs of the pair being traded.
+3. `impact` has four values, not three: High, Medium, Low, and Holiday. A Pydantic enum
+   missing Holiday will reject the whole feed.
+4. There is no event ID. Deduplicate on (date, country, title).
+5. A User-Agent header is REQUIRED. Without one the host returns HTTP 429. The feed is
+   Cloudflare-fronted and sends no-cache headers, so cache to disk ourselves and back off
+   on 429 rather than polling.
+
+The feed covers the CURRENT WEEK ONLY; ff_calendar_nextweek.json is 404. So on a Friday
+the lookahead cannot see Sunday's open. Fail CLOSED: if the calendar is unavailable,
+stale, or the week has run out, treat the window as unsafe and refuse execution rather
+than assuming no event is due.
+
 - A kill_switch() method that revokes immediately and attempts to flatten all positions.
 - Persist grant state to disk so a process restart cannot silently resurrect a revoked grant.
   Fail closed: if state can't be read, assume ADVISORY.
@@ -470,32 +505,40 @@ anything.
 
 ## Appendix A — .env.example
 
+`.env.example` in the repo root is the source of truth; this is a summary. EXECUTION and DATA
+are separated because they belong to different services — the executor needs the MT5 block and
+nothing else, and the collector needs the DATA block and nothing else.
+
 ```bash
-# --- Broker (Exness demo ONLY) ---
+# ===== EXECUTION — MetaTrader 5 / Exness demo. Execution venue ONLY, not a data source. =====
 MT5_LOGIN=
 MT5_PASSWORD=
 MT5_SERVER=
 MT5_SYMBOLS=EURUSD,GBPUSD,EURGBP
+MT5_SYMBOL_SUFFIX=
+MT5_SERVER_UTC_OFFSET_HOURS=
+MT5_TERMINAL_PATH=
+MT5_DEVIATION_POINTS=20
 
-# --- LLM ---
+# ===== DATA — Forex Factory calendar needs no key, but DOES need a User-Agent (else 429). =====
+CALENDAR_USER_AGENT=fx-regime-agent/0.1
+
+# ===== LLM =====
 GEMINI_API_KEY=
 GROQ_API_KEY=
 LLM_PRIMARY_PROVIDER=gemini
 LLM_FALLBACK_PROVIDER=groq
 
-# --- Data ---
-FINNHUB_API_KEY=
-
-# --- Alerts ---
+# ===== ALERTS =====
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# --- Risk ---
+# ===== RISK =====
 RISK_PER_TRADE=0.005
 MAX_TOTAL_RISK=0.02
 DAILY_LOSS_LIMIT=0.03
 
-# --- Runtime ---
+# ===== RUNTIME =====
 LOG_LEVEL=INFO
 JOURNAL_DB_PATH=./data/journal.db
 TRADING_MODE=advisory
