@@ -8,8 +8,7 @@ from sqlalchemy import inspect, text
 from fxagent.store.engine import Database
 from fxagent.store.health import REQUIRED_TABLES, check_health
 from fxagent.store.schema import metadata
-
-from .conftest import make_database, requires_postgres
+from tests.conftest import make_database, requires_postgres, reset_migration_state
 
 pytestmark = [pytest.mark.db, requires_postgres]
 
@@ -69,16 +68,15 @@ async def test_health_check_detects_a_missing_table(database: Database) -> None:
         assert "windows" in report.missing_tables
         assert "windows" in report.summary()
     finally:
-        # Restore for the next test: the migration record still says 0006 ran.
+        # Restore for the next test. The migration record still claims 0006 ran, so the row is
+        # removed and the shared fixture is told to migrate again on its next use.
         async with database.connect() as connection:
             raw = await connection.get_raw_connection()
             await raw.driver_connection.execute(
                 "delete from schema_migrations where version = '0006'"
             )
             await connection.commit()
-        import tests.store.conftest as conftest_module
-
-        conftest_module._migrated = False
+        reset_migration_state()
 
 
 # -- schema drift -------------------------------------------------------------
