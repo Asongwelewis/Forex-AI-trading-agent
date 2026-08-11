@@ -13,13 +13,20 @@ import pytest
 PACKAGES = [
     "fxagent",
     "fxagent.adapters",
+    "fxagent.indicators",
     "fxagent.strategies",
     "fxagent.regime",
     "fxagent.risk",
     "fxagent.permission",
-    "fxagent.journal",
-    "fxagent.llm",
+    "fxagent.store",
+    "fxagent.memory",
 ]
+
+#: Removed in Phase 5.5 and must not come back under these names. `store` supersedes `journal`
+#: (Supabase, not SQLite) and `agents` will supersede `llm`. An empty package whose docstring
+#: describes the old architecture is worse than no package: it is what a future session reads
+#: and infers from.
+REMOVED_PACKAGES = ["fxagent.journal", "fxagent.llm"]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -27,6 +34,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 @pytest.mark.parametrize("name", PACKAGES)
 def test_package_imports(name: str) -> None:
     assert importlib.import_module(name) is not None
+
+
+@pytest.mark.parametrize("name", REMOVED_PACKAGES)
+def test_superseded_packages_stay_deleted(name: str) -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(name)
 
 
 def test_env_example_has_no_filled_values() -> None:
