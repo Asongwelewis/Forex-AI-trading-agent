@@ -1,0 +1,36 @@
+# Local Postgres for the store test suite. NOT the Supabase project.
+#
+# Tests run against this so they can create, truncate and drop freely. Pointing them at the
+# live Supabase project would mean the point-in-time tests are inserting fabricated events
+# into the same table the analyst reads from.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   $env:TEST_DATABASE_URL = "postgresql://fxagent:fxagent@localhost:15432/fxagent_test"
+#   uv run pytest -m db
+#
+# The image is pgvector's, not plain postgres: `create extension vector` needs the binaries
+# present, and the stock postgres image does not ship them.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: fxagent
+      POSTGRES_PASSWORD: fxagent
+      POSTGRES_DB: fxagent_test
+    ports:
+      # 15432, not 5432 — a developer machine running a real Postgres should not have the test
+      # container silently take its port, nor the tests silently hit the real one.
+      # Deliberately below 49152: Windows reserves scattered ranges in the ephemeral space for
+      # Hyper-V (see `netsh interface ipv4 show excludedportrange protocol=tcp`), and a port
+      # inside one binds fine on Linux and fails on Windows with a permissions error.
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxagent -d fxagent_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      # Storage is disposable; keeping it in RAM makes the suite faster and guarantees a clean
+      # database every time the container restarts.
+      - /var/lib/postgresql/data
