@@ -355,16 +355,25 @@ def _detecting_adapter(
     quote_age: timedelta,
     selectable: bool = True,
     configured_offset: str | None = None,
+    clock_symbol: str | None = None,
+    warmup: timedelta = timedelta(0),
 ) -> tuple[MT5LocalAdapter, FakeQuoteMT5]:
-    """Adapter whose broker clock sits at `broker_offset` and whose quote is `quote_age` old."""
+    """Adapter whose broker clock sits at `broker_offset` and whose quote is `quote_age` old.
+
+    `warmup` defaults to zero so the rejection cases do not each spend the real warm-up
+    budget waiting for a tick the fake will never refresh.
+    """
     broker_wall_clock = datetime.now(UTC) + broker_offset - quote_age
     fake = FakeQuoteMT5(tick_epoch=int(broker_wall_clock.timestamp()), selectable=selectable)
 
     env = {**ENV, "MT5_SYMBOL_SUFFIX": "m"}
     if configured_offset is not None:
         env["MT5_SERVER_UTC_OFFSET_HOURS"] = configured_offset
+    if clock_symbol is not None:
+        env["MT5_CLOCK_SYMBOL"] = clock_symbol
     adapter = MT5LocalAdapter.from_env(env)
     adapter._mt5 = fake  # type: ignore[assignment]
+    adapter._tick_warmup = warmup
     return adapter, fake
 
 
@@ -437,3 +446,100 @@ def test_a_configured_zero_offset_skips_detection_rather_than_being_falsy() -> N
     )
     assert adapter._resolve_server_offset() == timedelta(0)
     assert fake.selected == []
+
+
+# --- a freshly subscribed symbol serves its cached tick first -----------------
+#
+# Measured on a live terminal: connecting on a Thursday at 17:21 UTC, with the market open
+# and quotes flowing, failed with "implausible server time offset of -3 days". The symbol
+# was not in Market Watch, so `symbol_select` succeeded and the very next `symbol_info_tick`
+# returned the tick cached from the last time it had been. The guard was right to refuse it;
+# the mistake was reading only once.
+
+
+class ColdMarketWatchMT5(FakeQuoteMT5):
+    """Serves a stale cached tick for the first `stale_reads`, then a live one."""
+
+    def __init__(self, *, stale_epoch: int, live_offset: timedelta, stale_reads: int) -> None:
+        super().__init__(tick_epoch=stale_epoch)
+        self._live_offset = live_offset
+        self._remaining_stale = stale_reads
+        self.reads = 0
+
+    def symbol_info_tick(self, symbol: str) -> SimpleNamespace | None:
+        self.reads += 1
+        if self._remaining_stale > 0:
+            self._remaining_stale -= 1
+            return SimpleNamespace(time=self._tick_epoch)
+        live = datetime.now(UTC) + self._live_offset
+        return SimpleNamespace(time=int(live.timestamp()))
+
+
+def _cold_adapter(
+    *, stale_reads: int, warmup: timedelta
+) -> tuple[MT5LocalAdapter, ColdMarketWatchMT5]:
+    stale = datetime.now(UTC) - timedelta(days=3)
+    fake = ColdMarketWatchMT5(
+        stale_epoch=int(stale.timestamp()), live_offset=timedelta(0), stale_reads=stale_reads
+    )
+    adapter = MT5LocalAdapter.from_env({**ENV, "MT5_SYMBOL_SUFFIX": "m"})
+    adapter._mt5 = fake  # type: ignore[assignment]
+    adapter._tick_warmup = warmup
+    return adapter, fake
+
+
+def test_a_cached_tick_is_polled_past_rather_than_failed_on() -> None:
+    """The regression: three days stale on the first read, live on the second."""
+    adapter, fake = _cold_adapter(stale_reads=1, warmup=timedelta(seconds=2))
+    assert adapter._resolve_server_offset() == timedelta(0)
+    assert fake.reads >= 2, "detection gave up after a single read"
+
+
+def test_polling_stops_as_soon_as_a_live_tick_arrives() -> None:
+    adapter, fake = _cold_adapter(stale_reads=0, warmup=timedelta(seconds=2))
+    adapter._resolve_server_offset()
+    assert fake.reads == 1, "a live first tick must not be followed by more polling"
+
+
+def test_a_quote_that_never_goes_live_is_still_refused() -> None:
+    """Polling widens what detection is shown; it must not widen what it accepts."""
+    adapter, fake = _cold_adapter(stale_reads=1_000, warmup=timedelta(milliseconds=400))
+    with pytest.raises(MT5ConnectionError, match="implausible server time offset"):
+        adapter._resolve_server_offset()
+    assert fake.reads >= 2
+
+
+def test_the_failure_message_points_at_the_clock_symbol_escape_hatch() -> None:
+    adapter, _ = _cold_adapter(stale_reads=1_000, warmup=timedelta(milliseconds=200))
+    with pytest.raises(MT5ConnectionError, match="MT5_CLOCK_SYMBOL"):
+        adapter._resolve_server_offset()
+
+
+# --- MT5_CLOCK_SYMBOL ---------------------------------------------------------
+
+
+def test_clock_symbol_defaults_to_the_first_configured_symbol() -> None:
+    adapter = MT5LocalAdapter.from_env({**ENV, "MT5_SYMBOL_SUFFIX": "m"})
+    assert adapter.clock_symbol == adapter.reference_symbol == "EURUSD"
+
+
+def test_clock_symbol_is_read_from_the_environment() -> None:
+    """A 24/7 crypto CFD keeps offset detection working at the weekend."""
+    adapter = MT5LocalAdapter.from_env(
+        {**ENV, "MT5_SYMBOL_SUFFIX": "m", "MT5_CLOCK_SYMBOL": "BTCUSD"}
+    )
+    assert adapter.clock_symbol == "BTCUSD"
+    assert adapter.reference_symbol == "EURUSD", "the trading symbol list is unaffected"
+
+
+def test_detection_quotes_the_clock_symbol_not_the_reference_symbol() -> None:
+    adapter, fake = _detecting_adapter(
+        broker_offset=timedelta(0), quote_age=timedelta(seconds=2), clock_symbol="BTCUSD"
+    )
+    adapter._resolve_server_offset()
+    assert fake.selected == ["BTCUSDm"], "the suffix still applies to the clock symbol"
+
+
+def test_a_blank_clock_symbol_falls_back_rather_than_selecting_nothing() -> None:
+    adapter = MT5LocalAdapter.from_env({**ENV, "MT5_SYMBOL_SUFFIX": "m", "MT5_CLOCK_SYMBOL": "   "})
+    assert adapter.clock_symbol == "EURUSD"
