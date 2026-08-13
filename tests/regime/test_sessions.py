@@ -34,6 +34,15 @@ def _hhmm(bounds: tuple[datetime, datetime]) -> tuple[str, str]:
     return bounds[0].strftime("%H:%M"), bounds[1].strftime("%H:%M")
 
 
+def _first_open_hour(day: date) -> int:
+    """The first UTC hour on `day` at which the market is open."""
+    return next(
+        hour
+        for hour in range(24)
+        if is_market_open(datetime(day.year, day.month, day.day, hour, tzinfo=UTC))
+    )
+
+
 class TestDaylightSaving:
     def test_london_bounds_differ_between_january_and_july(self) -> None:
         """The load-bearing test. Same local hours, different UTC instants."""
@@ -111,31 +120,73 @@ class TestExactBoundaries:
 
 
 class TestWeeklyOpenAndClose:
+    """The FX week runs Sunday 17:00 to Friday 17:00 in New York, so it moves with US DST.
+
+    Written first as a fixed 21:00 UTC. Two years of backfilled Exness H1 disproved that:
+    36 slots the fixed rule called tradeable had no bar, every one of them Sunday 21:00 UTC
+    and every one between November and March. These tests pin the corrected boundary at both
+    ends of the year so it cannot quietly revert.
+    """
+
     @pytest.mark.parametrize(
         ("label", "moment", "expected"),
         [
-            ("Friday 20:59", datetime(2026, 1, 16, 20, 59, tzinfo=UTC), True),
-            ("Friday 21:01", datetime(2026, 1, 16, 21, 1, tzinfo=UTC), False),
+            # Winter, New York on EST: the week is 22:00 UTC to 22:00 UTC.
+            ("winter Friday 21:59", datetime(2026, 1, 16, 21, 59, tzinfo=UTC), True),
+            ("winter Friday 22:01", datetime(2026, 1, 16, 22, 1, tzinfo=UTC), False),
+            ("winter Sunday 21:59", datetime(2026, 1, 18, 21, 59, tzinfo=UTC), False),
+            ("winter Sunday 22:01", datetime(2026, 1, 18, 22, 1, tzinfo=UTC), True),
+            # Summer, New York on EDT: an hour earlier in UTC at both ends.
+            ("summer Friday 20:59", datetime(2026, 7, 17, 20, 59, tzinfo=UTC), True),
+            ("summer Friday 21:01", datetime(2026, 7, 17, 21, 1, tzinfo=UTC), False),
+            ("summer Sunday 20:59", datetime(2026, 7, 19, 20, 59, tzinfo=UTC), False),
+            ("summer Sunday 21:01", datetime(2026, 7, 19, 21, 1, tzinfo=UTC), True),
             ("Saturday noon", datetime(2026, 1, 17, 12, 0, tzinfo=UTC), False),
-            ("Sunday 20:59", datetime(2026, 1, 18, 20, 59, tzinfo=UTC), False),
-            ("Sunday 21:01", datetime(2026, 1, 18, 21, 1, tzinfo=UTC), True),
             ("Monday 09:00", datetime(2026, 1, 19, 9, 0, tzinfo=UTC), True),
         ],
     )
     def test_market_hours(self, label: str, moment: datetime, expected: bool) -> None:
         assert is_market_open(moment) is expected, label
 
-    def test_minutes_until_close_counts_down_to_friday_close(self) -> None:
-        assert minutes_until_close(datetime(2026, 1, 16, 20, 59, tzinfo=UTC)) == 1
-        assert minutes_until_close(datetime(2026, 1, 16, 20, 0, tzinfo=UTC)) == 60
+    def test_the_sunday_open_differs_between_january_and_july(self) -> None:
+        """The load-bearing assertion. A fixed UTC rule makes these two equal."""
+        winter = _first_open_hour(date(2026, 1, 18))
+        summer = _first_open_hour(date(2026, 7, 19))
+
+        assert winter == 22, "on EST the week opens at 22:00 UTC"
+        assert summer == 21, "on EDT it opens at 21:00 UTC"
+        assert winter != summer, (
+            "January and July opened at the same UTC hour, so the weekly boundary is fixed "
+            "again and the winter week reopens an hour before any bar exists"
+        )
+
+    def test_minutes_until_close_differs_by_an_hour_between_seasons(self) -> None:
+        """Same Friday clock hour, an hour more of week left in winter."""
+        winter = minutes_until_close(datetime(2026, 1, 16, 12, 0, tzinfo=UTC))
+        summer = minutes_until_close(datetime(2026, 7, 17, 12, 0, tzinfo=UTC))
+
+        assert winter - summer == 60
+        assert (winter, summer) == (600, 540)
+
+    def test_minutes_until_close_counts_down_to_the_new_york_close(self) -> None:
+        assert minutes_until_close(datetime(2026, 1, 16, 21, 59, tzinfo=UTC)) == 1
+        assert minutes_until_close(datetime(2026, 7, 17, 20, 59, tzinfo=UTC)) == 1
 
     def test_minutes_until_close_is_zero_when_shut(self) -> None:
         """Zero means "no time left to hold anything", not "closing right now"."""
         assert minutes_until_close(datetime(2026, 1, 17, 12, 0, tzinfo=UTC)) == 0
 
     def test_a_full_week_is_measured_from_the_sunday_open(self) -> None:
-        just_open = datetime(2026, 1, 18, 21, 1, tzinfo=UTC)
+        just_open = datetime(2026, 1, 18, 22, 1, tzinfo=UTC)
         assert minutes_until_close(just_open) == 5 * 24 * 60 - 1
+
+    def test_the_friday_close_is_not_skipped_late_on_a_friday_in_utc(self) -> None:
+        """21:30 UTC on a winter Friday is still Friday afternoon in New York.
+
+        Stepping forward on the UTC calendar here would land on next week's close and report
+        a week of remaining time half an hour before the market shuts.
+        """
+        assert minutes_until_close(datetime(2026, 1, 16, 21, 30, tzinfo=UTC)) == 30
 
     def test_no_session_is_active_while_the_market_is_shut(self) -> None:
         assert active_sessions(datetime(2026, 1, 17, 12, 0, tzinfo=UTC)) == frozenset()

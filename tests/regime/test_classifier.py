@@ -98,8 +98,12 @@ class TestSessionFields:
         assert regime.minutes_until_weekly_close == 0
 
     def test_minutes_until_close_is_carried_on_the_regime(self) -> None:
+        """Thursday 09:00 UTC to the Friday close, which in January is 22:00 UTC.
+
+        37 hours, not 36: the week ends at 17:00 in New York, and New York is on EST here.
+        """
         regime = RegimeClassifier().classify(h1_series(flat_run(end=LONDON_MORNING, count=130)))
-        assert regime.minutes_until_weekly_close == 36 * 60
+        assert regime.minutes_until_weekly_close == 37 * 60
 
 
 class TestConfigValidation:
