@@ -8,7 +8,11 @@ connection string lives under Settings > Database, and is a separate value.
 
 **`sslmode` is a libpq parameter and asyncpg rejects it.** Supabase's copy-paste connection
 strings carry ``?sslmode=require``, so pasting one in unmodified fails at connect with an
-obscure ``unexpected keyword argument``. It is translated here into asyncpg's own ``ssl``.
+obscure ``unexpected keyword argument``. It is translated here into asyncpg's own ``ssl``,
+preserving each mode's real meaning — ``require`` encrypts without verifying, and is *not*
+``verify-full``. See `_ssl_from_sslmode`; getting that distinction wrong makes Supabase's own
+connection string impossible to use, because its pooler serves a self-signed certificate on
+the Postgres port even though the same hostname serves a properly signed one on 443.
 
 **The transaction pooler forbids prepared statements.** Port 6543 is pgbouncer in transaction
 mode, where SQLAlchemy's default statement caching breaks with ``prepared statement "__asyncpg_
@@ -18,6 +22,7 @@ stmt_1__" already exists``. Detected by port and disabled automatically.
 from __future__ import annotations
 
 import os
+import ssl
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -156,23 +161,53 @@ def _normalise(raw: str) -> tuple[str, dict[str, Any], int | None]:
 
     host = parts.hostname
     if "ssl" not in connect_args and host not in _LOCAL_HOSTS:
-        # Supabase requires TLS. A remote host with no explicit sslmode still gets it.
+        # A remote host with no explicit sslmode gets full verification. Deliberately the
+        # strict end: an omitted parameter should not silently buy the weaker posture, and
+        # a URL that must not verify can say so with `?sslmode=require`. Against Supabase
+        # this fails with "self-signed certificate in certificate chain" until it does.
         connect_args["ssl"] = True
 
     normalised = urlunsplit((scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
     return normalised, connect_args, parts.port
 
 
-def _ssl_from_sslmode(value: str) -> bool | None:
-    """Map libpq's sslmode onto the boolean asyncpg understands.
+def _ssl_from_sslmode(value: str) -> bool | ssl.SSLContext | None:
+    """Map libpq's sslmode onto what asyncpg accepts, preserving libpq's actual semantics.
 
-    `verify-ca`/`verify-full` need an SSLContext with a CA bundle, which is a deployment
-    concern rather than a config-parsing one; they are treated as "TLS on" here and the
-    stricter verification is left to be configured explicitly if it is ever required.
+    **`require` is not `verify-full`.** In libpq, `require` means "the connection must be
+    encrypted" and deliberately says nothing about trusting the certificate; only the two
+    `verify-*` modes check it. Collapsing them onto `ssl=True` — which makes asyncpg build a
+    fully verifying context — silently asks for something *stricter* than the caller wrote,
+    and that is not a safe direction to be wrong in either: it fails closed against Supabase,
+    whose pooler presents a self-signed certificate on the Postgres port, so the connection
+    string Supabase itself hands you cannot connect.
+
+    So the modes are mapped to what they actually mean:
+
+    * `disable`/`allow` — no TLS.
+    * `prefer`/`require` — encrypt, do not verify. Safe against passive eavesdropping, not
+      against an active man-in-the-middle. This is what Supabase's own string asks for.
+    * `verify-ca` — verify the chain, allow a hostname mismatch.
+    * `verify-full` — verify chain and hostname, against the system trust store. Supabase
+      needs its CA certificate installed for this to succeed.
     """
     mode = value.strip().lower()
     if mode in ("disable", "allow"):
         return False
-    if mode in ("prefer", "require", "verify-ca", "verify-full"):
+    if mode in ("prefer", "require"):
+        return _unverified_context()
+    if mode == "verify-ca":
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        return context
+    if mode == "verify-full":
         return True
     raise DatabaseConfigError(f"unrecognised sslmode {value!r} in database URL")
+
+
+def _unverified_context() -> ssl.SSLContext:
+    """Encrypt without verifying, which is what libpq's `require` promises and no more."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context

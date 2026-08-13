@@ -17,10 +17,14 @@ way the rules are written — "during LONDON" stays true through the overlap, an
 OVERLAP" is a separate question — instead of forcing every caller to remember that OVERLAP
 secretly means "and also London and New York".
 
-**The weekly boundary is genuinely UTC.** Sunday 21:00 to Friday 21:00 UTC is a broker
-convention, not an exchange's business day, and CLAUDE.md records it in UTC because that is
-how it is actually observed. It is deliberately not modelled in a local zone; the DST rule
-above applies to *session* hours, which are business hours somewhere, and not to this.
+**The weekly boundary moves too, and this was measured rather than assumed.** It was first
+written as a fixed Sunday 21:00 to Friday 21:00 UTC, on the reasoning that the FX week is a
+broker convention rather than any exchange's business day. Backfilling two years of Exness H1
+disproved that: 36 hourly slots the fixed rule called tradeable had no bar, and every single
+one was **Sunday 21:00 UTC, in November through March**. That is US winter time. The week
+opens and closes with New York's 17:00, which is 21:00 UTC on EDT and 22:00 UTC on EST — so
+the fixed rule declared the market open for an hour every winter Sunday when nothing traded.
+It is therefore derived from `America/New_York` like everything else here.
 
 Every function takes the moment it should evaluate. Nothing here reads a clock, so replaying
 a bar gives the same answer it gave live.
@@ -38,8 +42,9 @@ __all__ = [
     "Session",
     "SessionOpening",
     "SessionWindow",
-    "WEEKLY_CLOSE_HOUR_UTC",
-    "WEEKLY_OPEN_HOUR_UTC",
+    "WEEK_CLOSE_LOCAL",
+    "WEEK_OPEN_LOCAL",
+    "WEEK_ZONE",
     "active_sessions",
     "dominant_session",
     "is_market_open",
@@ -178,10 +183,11 @@ def _spans_utc_midnight(session: Session, before_local_hour: int) -> bool:
 #: The window `session_breakout` trades and the router permits it in. One object, two callers.
 LONDON_MORNING = SessionOpening(Session.LONDON, 12)
 
-#: FX opens Sunday 21:00 UTC and closes Friday 21:00 UTC. See the module docstring for why
-#: these two, alone, are UTC constants.
-WEEKLY_OPEN_HOUR_UTC = 21
-WEEKLY_CLOSE_HOUR_UTC = 21
+#: The FX week runs Sunday 17:00 to Friday 17:00 in New York — 21:00 UTC on EDT, 22:00 UTC on
+#: EST. Local, not UTC: see the module docstring for the 36 missing bars that settled it.
+WEEK_ZONE = "America/New_York"
+WEEK_OPEN_LOCAL = time(17, 0)
+WEEK_CLOSE_LOCAL = time(17, 0)
 _SUNDAY = 6
 _FRIDAY = 4
 
@@ -209,37 +215,42 @@ def local_time(moment: datetime, zone: str) -> datetime:
 
 
 def is_market_open(moment: datetime) -> bool:
-    """Is FX trading at `moment`? Sunday 21:00 UTC through Friday 21:00 UTC.
+    """Is FX trading at `moment`? Sunday 17:00 through Friday 17:00, New York time.
 
-    **These UTC hour comparisons are correct — do not "fix" them into a local zone.** Every
-    other boundary in this module is a business day in a named city and must be converted;
-    this one is not. The weekly open and close are a broker convention observed in UTC, they
-    belong to no exchange's working hours, and CLAUDE.md records them in UTC because that is
-    how they are actually kept. Reading them through `Europe/London` or any other zone would
-    move the Friday close by an hour every summer and invent a bug where there is none.
+    Judged on New York's wall clock, so the boundary follows US daylight saving without
+    being told about it. An earlier version compared UTC hours against a fixed 21:00; the
+    backfill found 36 Sunday 21:00 slots with no bar, all in November-March, which is exactly
+    the hour that rule invented every winter. See the module docstring.
     """
-    utc = _require_aware(moment)
-    weekday = utc.weekday()
+    local = local_time(moment, WEEK_ZONE)
+    weekday = local.weekday()
+    clock = local.timetz().replace(tzinfo=None)
 
     if weekday == 5:  # Saturday, always shut
         return False
     if weekday == _SUNDAY:
-        return utc.hour >= WEEKLY_OPEN_HOUR_UTC
+        return clock >= WEEK_OPEN_LOCAL
     if weekday == _FRIDAY:
-        return utc.hour < WEEKLY_CLOSE_HOUR_UTC
+        return clock < WEEK_CLOSE_LOCAL
     return True
 
 
 def _next_weekly_close(moment: datetime) -> datetime:
-    """The first Friday 21:00 UTC strictly after `moment`."""
-    utc = _require_aware(moment)
-    ahead = (_FRIDAY - utc.weekday()) % 7
-    candidate = (utc + timedelta(days=ahead)).replace(
-        hour=WEEKLY_CLOSE_HOUR_UTC, minute=0, second=0, microsecond=0
-    )
-    if candidate <= utc:
-        candidate += timedelta(days=7)
-    return candidate
+    """The first Friday 17:00 New York strictly after `moment`, as a UTC instant.
+
+    Anchored on the New York calendar rather than the UTC one: late on a Friday UTC evening
+    it is still Friday in New York, and stepping forward on the wrong calendar would skip a
+    whole week. 17:00 never lands in a DST gap, so the local time is always constructible.
+    """
+    local = local_time(moment, WEEK_ZONE)
+    zone = ZoneInfo(WEEK_ZONE)
+    ahead = (_FRIDAY - local.weekday()) % 7
+    friday = (local + timedelta(days=ahead)).date()
+
+    candidate = datetime.combine(friday, WEEK_CLOSE_LOCAL, tzinfo=zone)
+    if candidate <= local:
+        candidate = datetime.combine(friday + timedelta(days=7), WEEK_CLOSE_LOCAL, tzinfo=zone)
+    return candidate.astimezone(UTC)
 
 
 def minutes_until_close(moment: datetime) -> int:

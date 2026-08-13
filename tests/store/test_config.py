@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ssl
+
 import pytest
 
 from fxagent.store.config import DatabaseConfig, DatabaseConfigError
@@ -29,22 +31,61 @@ def test_sslmode_is_translated_and_removed_from_the_query() -> None:
     config = DatabaseConfig.from_url(SUPABASE_POOLER)
 
     assert "sslmode" not in config.url
+    assert isinstance(config.connect_args["ssl"], ssl.SSLContext)
+
+
+@pytest.mark.parametrize("mode", ["disable", "allow"])
+def test_sslmode_can_turn_tls_off(mode: str) -> None:
+    config = DatabaseConfig.from_url(f"postgresql://u:p@example.com:5432/db?sslmode={mode}")
+    assert config.connect_args["ssl"] is False
+
+
+@pytest.mark.parametrize("mode", ["prefer", "require"])
+def test_require_encrypts_without_verifying(mode: str) -> None:
+    """libpq's `require` promises encryption and says nothing about trust.
+
+    Mapping it to `ssl=True` would make asyncpg verify the chain and the hostname, which is
+    `verify-full` — stricter than asked, and the reason Supabase's own connection string
+    could not connect: its pooler serves a self-signed certificate on the Postgres port.
+    """
+    context = DatabaseConfig.from_url(
+        f"postgresql://u:p@example.com:5432/db?sslmode={mode}"
+    ).connect_args["ssl"]
+
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode is ssl.CERT_NONE
+    assert context.check_hostname is False
+
+
+def test_verify_ca_checks_the_chain_but_not_the_hostname() -> None:
+    context = DatabaseConfig.from_url(
+        "postgresql://u:p@example.com:5432/db?sslmode=verify-ca"
+    ).connect_args["ssl"]
+
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is False
+
+
+def test_verify_full_is_the_only_mode_that_checks_the_hostname() -> None:
+    config = DatabaseConfig.from_url("postgresql://u:p@example.com:5432/db?sslmode=verify-full")
     assert config.connect_args["ssl"] is True
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected"),
-    [
-        ("disable", False),
-        ("allow", False),
-        ("prefer", True),
-        ("require", True),
-        ("verify-full", True),
-    ],
-)
-def test_sslmode_values_map_to_asyncpg_ssl(mode: str, expected: bool) -> None:
-    config = DatabaseConfig.from_url(f"postgresql://u:p@example.com:5432/db?sslmode={mode}")
-    assert config.connect_args["ssl"] is expected
+def test_the_modes_are_ordered_from_weakest_to_strongest() -> None:
+    """A regression guard: the four TLS modes must not collapse onto one another again."""
+
+    def posture(mode: str) -> object:
+        value = DatabaseConfig.from_url(
+            f"postgresql://u:p@example.com:5432/db?sslmode={mode}"
+        ).connect_args["ssl"]
+        if isinstance(value, ssl.SSLContext):
+            return (value.verify_mode, value.check_hostname)
+        return value
+
+    assert posture("disable") is False
+    assert posture("require") != posture("verify-ca") != posture("verify-full")
+    assert posture("require") != posture("verify-full")
 
 
 def test_unknown_sslmode_is_rejected_rather_than_guessed() -> None:
@@ -52,7 +93,8 @@ def test_unknown_sslmode_is_rejected_rather_than_guessed() -> None:
         DatabaseConfig.from_url("postgresql://u:p@example.com/db?sslmode=maybe")
 
 
-def test_remote_host_gets_tls_even_without_sslmode() -> None:
+def test_remote_host_gets_full_verification_when_no_sslmode_is_given() -> None:
+    """Strict by default. An omitted parameter must not silently buy the weaker posture."""
     config = DatabaseConfig.from_url("postgresql://u:p@db.abc.supabase.co:5432/postgres")
     assert config.connect_args["ssl"] is True
 
