@@ -1,9 +1,14 @@
-"""Range reversion: fade the stretch, but only when ADX says the market is ranging.
+"""Range reversion: fade the stretch, but only when the *regime* says the market is ranging.
 
-The negative tests carry the weight. Each one proves *which* gate refused: the ADX test
-asserts the z-score was past its trigger anyway, and the z-score test asserts ADX was
-comfortably inside its ceiling. Without that, a fixture that simply never set up would
-pass as a working gate.
+The negative tests carry the weight. Each one proves *which* gate refused: the regime test
+asserts the z-score was past its trigger anyway, and the z-score test hands in a regime that
+is explicitly ranging. Without that, a fixture that simply never set up would pass as a
+working gate.
+
+The range gate itself is no longer measured here — it arrives on the `Regime`. These tests
+therefore inject the regime directly rather than classifying the fixtures, because they are
+about this strategy's arithmetic. That the injected boolean is the same one the router reads
+is proved in `tests/regime/test_gate_coupling.py`, which classifies for real.
 """
 
 from __future__ import annotations
@@ -13,9 +18,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from fxagent.indicators import adx, rolling_zscore
+from fxagent.adapters.base import BarSeries
+from fxagent.indicators import rolling_zscore
+from fxagent.regime.classifier import Regime
 from fxagent.strategies import MarketContext, SignalDirection, bars_to_frame
 from fxagent.strategies.range_reversion import RangeReversion
+from tests.regime.builders import regime_at
 from tests.strategies.builders import bar, flat_run, h1_series
 
 CONTEXT = MarketContext.neutral()
@@ -26,45 +34,30 @@ SPIKE_TR = 0.0061
 
 #: Wilder's step from a settled ATR of 0.0020 onto the single 0.0061 spike bar.
 EXPECTED_ATR = (BASELINE_TR * 13 + SPIKE_TR) / 14
-#: The flat run produces no directional movement at all, so ADX sits at 0 until the spike,
-#: whose DX of 100 enters the average once: (0 * 13 + 100) / 14.
-EXPECTED_ADX = 100.0 / 14.0
 #: 19 identical closes plus one outlier always gives this, whatever the outlier's size.
 EXPECTED_ABS_Z = 0.95 / math.sqrt(0.05)
+
+#: ADX values either side of the classifier's default 20.0 boundary.
+RANGING = 10.0
+TRENDING = 30.0
 
 SPIKE_UP = {"open_": 1.1000, "high": 1.1060, "low": 1.0999, "close": 1.1050}
 SPIKE_DOWN = {"open_": 1.1000, "high": 1.1001, "low": 1.0940, "close": 1.0950}
 
 
-def _spiked(shape: dict[str, float], *, count: int = 40):
+def _spiked(shape: dict[str, float], *, count: int = 40) -> BarSeries:
     """A long flat run — zero directional movement — with one violent bar on the end."""
     bars = flat_run(end=FLAT_END, count=count, band=BAND)
     return h1_series([*bars, bar(FLAT_END + timedelta(hours=1), **shape)])
 
 
-def _h1_ramp(count: int, *, step: float = 0.0010, final_jump: float = 0.0):
-    """A staircase trend: every bar a higher high and a higher low, so ADX saturates."""
-    start = FLAT_END - timedelta(hours=count - 1)
-    bars = []
-    price = 1.1000
-    for index in range(count):
-        price = 1.1000 + step * index
-        if index == count - 1:
-            price += final_jump
-        bars.append(
-            bar(
-                start + timedelta(hours=index),
-                open_=price,
-                high=price + 0.0005,
-                low=price - 0.0005,
-                close=price,
-            )
-        )
-    return h1_series(bars)
+def _regime(bars: BarSeries, *, trend_strength: float = RANGING) -> Regime:
+    """A regime describing exactly the last bar of `bars`, as the strategy demands."""
+    return regime_at(bars.bars[-1].timestamp, trend_strength=trend_strength, symbol=bars.symbol)
 
 
-def _oscillating(count: int = 40):
-    """Closes alternating by a hair: ADX stays low but no z-score ever reaches the trigger."""
+def _oscillating(count: int = 40) -> BarSeries:
+    """Closes alternating by a hair, so no z-score ever reaches the trigger."""
     start = FLAT_END - timedelta(hours=count - 1)
     return h1_series(
         [
@@ -80,29 +73,36 @@ def _oscillating(count: int = 40):
     )
 
 
-def _indicator(bars, name: str) -> float:
-    frame = bars_to_frame(bars)
-    if name == "adx":
-        return float(adx(frame["high"], frame["low"], frame["close"], 14).iloc[-1])
-    return float(rolling_zscore(frame["close"], 20).iloc[-1])
+def _zscore(bars: BarSeries) -> float:
+    return float(rolling_zscore(bars_to_frame(bars)["close"], 20).iloc[-1])
 
 
 # --- it fires ------------------------------------------------------------------
 
 
 def test_a_stretch_above_the_mean_is_faded_short() -> None:
-    signal = RangeReversion().generate(_spiked(SPIKE_UP), CONTEXT)
+    bars = _spiked(SPIKE_UP)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     assert signal.direction is SignalDirection.SHORT
     assert signal.entry_price == pytest.approx(1.1050)
     assert signal.reasoning["zscore"] == pytest.approx(EXPECTED_ABS_Z)
-    assert signal.reasoning["adx"] == pytest.approx(EXPECTED_ADX)
     assert signal.reasoning["atr"] == pytest.approx(EXPECTED_ATR)
 
 
+def test_the_logged_adx_is_the_regimes_not_a_locally_recomputed_one() -> None:
+    """The journal must show the number the gate was actually taken on."""
+    bars = _spiked(SPIKE_UP)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars, trend_strength=12.5))
+
+    assert signal is not None
+    assert signal.reasoning["adx"] == pytest.approx(12.5)
+
+
 def test_a_stretch_below_the_mean_is_faded_long() -> None:
-    signal = RangeReversion().generate(_spiked(SPIKE_DOWN), CONTEXT)
+    bars = _spiked(SPIKE_DOWN)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     assert signal.direction is SignalDirection.LONG
@@ -112,7 +112,8 @@ def test_a_stretch_below_the_mean_is_faded_long() -> None:
 
 def test_the_short_stop_sits_an_atr_multiple_beyond_the_bars_high() -> None:
     """Beyond the extreme, not beyond the entry — if this is the turn, the high holds."""
-    signal = RangeReversion().generate(_spiked(SPIKE_UP), CONTEXT)
+    bars = _spiked(SPIKE_UP)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     assert signal.stop_loss == pytest.approx(1.1060 + 1.5 * EXPECTED_ATR)
@@ -120,7 +121,8 @@ def test_the_short_stop_sits_an_atr_multiple_beyond_the_bars_high() -> None:
 
 
 def test_the_long_stop_sits_an_atr_multiple_beyond_the_bars_low() -> None:
-    signal = RangeReversion().generate(_spiked(SPIKE_DOWN), CONTEXT)
+    bars = _spiked(SPIKE_DOWN)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     assert signal.stop_loss == pytest.approx(1.0940 - 1.5 * EXPECTED_ATR)
@@ -135,7 +137,8 @@ def test_the_long_stop_sits_an_atr_multiple_beyond_the_bars_low() -> None:
 def test_stop_is_always_on_the_losing_side_of_entry(
     shape: dict[str, float], direction: SignalDirection
 ) -> None:
-    signal = RangeReversion().generate(_spiked(shape), CONTEXT)
+    bars = _spiked(shape)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     if direction is SignalDirection.SHORT:
@@ -146,7 +149,8 @@ def test_stop_is_always_on_the_losing_side_of_entry(
 
 def test_the_target_is_the_rolling_mean_it_is_reverting_to() -> None:
     """19 closes at 1.1000 and one at 1.1050 average to exactly 1.10025."""
-    signal = RangeReversion().generate(_spiked(SPIKE_UP), CONTEXT)
+    bars = _spiked(SPIKE_UP)
+    signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
     assert signal.take_profit == pytest.approx(1.10025)
@@ -156,53 +160,110 @@ def test_the_target_is_the_rolling_mean_it_is_reverting_to() -> None:
 # --- it refuses ----------------------------------------------------------------
 
 
-def test_a_trending_market_blocks_the_fade_even_when_the_stretch_qualifies() -> None:
-    """The gate that defines the strategy: same stretch, but ADX says this is a trend."""
-    trending = _h1_ramp(40, final_jump=0.0100)
+def test_a_trending_regime_blocks_the_fade_even_when_the_stretch_qualifies() -> None:
+    """The gate that defines the strategy — now asked of the regime, not of a local ADX."""
+    bars = _spiked(SPIKE_UP)
 
-    # Prove the setup is otherwise present, so the ADX gate is demonstrably what refused.
-    assert _indicator(trending, "zscore") > 2.0
-    assert _indicator(trending, "adx") >= 20.0
+    # Prove the setup is otherwise present, so the regime gate is demonstrably what refused.
+    assert _zscore(bars) > 2.0
+    assert RangeReversion().generate(bars, CONTEXT, _regime(bars)) is not None
 
-    assert RangeReversion().generate(trending, CONTEXT) is None
+    trending = _regime(bars, trend_strength=TRENDING)
+    assert trending.is_ranging is False
+    assert RangeReversion().generate(bars, CONTEXT, trending) is None
 
 
-def test_adx_exactly_at_the_ceiling_is_treated_as_trending() -> None:
-    """The rule is ADX < 20, so 20 itself blocks. A boundary this cheap should be pinned."""
-    from fxagent.strategies.range_reversion import ADX_TREND_CEILING
+def test_a_regime_that_is_neither_ranging_nor_trending_also_blocks() -> None:
+    """ADX in the gap between the thresholds is not a range, so there is nothing to fade."""
+    bars = _spiked(SPIKE_UP)
+    neither = _regime(bars, trend_strength=22.0)
 
-    assert ADX_TREND_CEILING == 20.0
-    trending = _h1_ramp(40, final_jump=0.0100)
-    assert _indicator(trending, "adx") >= ADX_TREND_CEILING
-    assert RangeReversion().generate(trending, CONTEXT) is None
+    assert neither.is_ranging is False
+    assert neither.is_trending is False
+    assert RangeReversion().generate(bars, CONTEXT, neither) is None
+
+
+def test_an_unknown_regime_blocks_rather_than_guessing() -> None:
+    """During classifier warm-up `is_ranging` is False, so the gate stays shut."""
+    bars = _spiked(SPIKE_UP)
+    warming_up = _regime(bars, trend_strength=None)
+
+    assert warming_up.trend_strength is None
+    assert warming_up.is_ranging is False
+    assert RangeReversion().generate(bars, CONTEXT, warming_up) is None
 
 
 def test_a_calm_market_without_a_stretch_produces_nothing() -> None:
-    """ADX is well inside its ceiling here, so the z-score trigger is what refused."""
+    """The regime is explicitly ranging here, so the z-score trigger is what refused."""
     calm = _oscillating()
+    ranging = _regime(calm)
 
-    assert _indicator(calm, "adx") < 20.0
-    assert abs(_indicator(calm, "zscore")) <= 2.0
-
-    assert RangeReversion().generate(calm, CONTEXT) is None
+    assert ranging.is_ranging is True
+    assert abs(_zscore(calm)) <= 2.0
+    assert RangeReversion().generate(calm, CONTEXT, ranging) is None
 
 
 def test_a_perfectly_flat_market_has_no_z_score_and_no_signal() -> None:
     """Zero variance makes the z-score undefined; NaN must not slip through as a trigger."""
     flat = h1_series(flat_run(end=FLAT_END, count=40, band=BAND))
 
-    assert math.isnan(_indicator(flat, "zscore"))
-    assert RangeReversion().generate(flat, CONTEXT) is None
+    assert math.isnan(_zscore(flat))
+    assert RangeReversion().generate(flat, CONTEXT, _regime(flat)) is None
 
 
 def test_too_little_history_returns_none() -> None:
     strategy = RangeReversion()
     short = _spiked(SPIKE_UP, count=strategy.required_bars - 2)
-    assert strategy.generate(short, CONTEXT) is None
+    assert strategy.generate(short, CONTEXT, _regime(short)) is None
 
 
-def test_required_bars_is_driven_by_the_adx_warm_up() -> None:
-    """ADX(14) has no value at all until bar 2*14-1, which outlasts every other input."""
+# --- the regime is required, and must describe this bar ------------------------
+
+
+def test_a_missing_regime_is_a_loud_wiring_error_not_a_quiet_none() -> None:
+    """Returning None here would hide a broken caller as an absent setup."""
+    bars = _spiked(SPIKE_UP)
+    with pytest.raises(ValueError, match="gates on the regime and was given none"):
+        RangeReversion().generate(bars, CONTEXT)
+
+
+def test_a_regime_for_another_symbol_is_refused() -> None:
+    bars = _spiked(SPIKE_UP)
+    wrong = regime_at(bars.bars[-1].timestamp, trend_strength=RANGING, symbol="GBPUSD")
+    with pytest.raises(ValueError, match="regime for 'GBPUSD'"):
+        RangeReversion().generate(bars, CONTEXT, wrong)
+
+
+def test_a_regime_from_a_different_bar_is_refused() -> None:
+    """A stale regime would gate this bar's trade on the previous bar's market."""
+    bars = _spiked(SPIKE_UP)
+    stale = regime_at(
+        bars.bars[-1].timestamp - timedelta(hours=1), trend_strength=RANGING, symbol=bars.symbol
+    )
+    with pytest.raises(ValueError, match="different bar than the trade"):
+        RangeReversion().generate(bars, CONTEXT, stale)
+
+
+# --- it owns no definition of "ranging" ----------------------------------------
+
+
+def test_the_strategy_defines_no_adx_constant_of_its_own() -> None:
+    """The regression guard: `ClassifierConfig` is the only place "ranging" is defined."""
+    import fxagent.strategies.range_reversion as module
+
+    offenders = [name for name in vars(module) if "ADX" in name.upper()]
+    assert not offenders, f"range_reversion re-defines {offenders}; the classifier owns these"
+
+
+def test_the_strategy_does_not_import_the_adx_indicator() -> None:
+    """Importing it would be the first step back to a second definition of the gate."""
+    import fxagent.strategies.range_reversion as module
+
+    assert "adx" not in vars(module)
+
+
+def test_required_bars_covers_only_what_this_file_measures() -> None:
+    """No longer driven by an ADX warm-up, because there is no longer an ADX here."""
     strategy = RangeReversion()
-    assert strategy.required_bars == 28
+    assert strategy.required_bars == 20
     assert strategy.name == "range_reversion"

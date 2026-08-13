@@ -18,12 +18,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import pandas as pd
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from fxagent.adapters.base import BarSeries, OrderSide
+
+if TYPE_CHECKING:
+    # Type-checking only, and deliberately so: `regime.classifier` imports this module, so a
+    # runtime import here would close the loop. `from __future__ import annotations` keeps the
+    # annotation a string, and no strategy needs the class itself — only attributes off an
+    # instance the caller supplies.
+    from fxagent.regime.classifier import Regime
 
 __all__ = [
     "MarketContext",
@@ -190,11 +197,19 @@ def bars_to_frame(bars: BarSeries) -> pd.DataFrame:
 
 
 class Strategy(ABC):
-    """A pure function from (bars, context) to an opinion.
+    """A pure function from (bars, context, regime) to an opinion.
 
     `generate` returns `None` for "this setup is not present", which is distinct from a
-    FLAT `Signal` meaning "I have looked and I want no exposure". The regime router in
-    Phase 5 needs both: silence does not count towards consensus, an explicit FLAT does.
+    FLAT `Signal` meaning "I have looked and I want no exposure". The regime router
+    needs both: silence does not count towards consensus, an explicit FLAT does.
+
+    **`regime` is optional in the contract and mandatory to whoever reads it.** A strategy
+    that gates on market state must not measure that state itself — `range_reversion` asking
+    "is this a range" with its own ADX gave a second definition of ranging that could drift
+    from the one the router gates on. Taking the classifier's answer instead means the two
+    read one boolean. Strategies that gate on nothing the classifier measures simply ignore
+    the argument, which is why it defaults rather than being required of all three; the ones
+    that do read it raise on a missing or mismatched regime rather than going quietly silent.
     """
 
     @property
@@ -212,7 +227,9 @@ class Strategy(ABC):
         """
 
     @abstractmethod
-    def generate(self, bars: BarSeries, context: MarketContext) -> Signal | None:
+    def generate(
+        self, bars: BarSeries, context: MarketContext, regime: Regime | None = None
+    ) -> Signal | None:
         """Produce a signal, or `None` if the setup or its gates are not satisfied."""
 
     def _has_enough_history(self, bars: BarSeries) -> bool:

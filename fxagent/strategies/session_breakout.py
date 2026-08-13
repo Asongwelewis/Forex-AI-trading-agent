@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 from datetime import date
+from typing import TYPE_CHECKING
 
 from fxagent.adapters.base import Bar, BarSeries
 from fxagent.indicators import atr
@@ -39,6 +40,9 @@ from fxagent.indicators import atr
 # `regime.sessions` imports nothing from fxagent, so this stays safe in both directions even
 # though `regime.consensus` imports `strategies.base`.
 from fxagent.regime.sessions import LONDON_MORNING, SessionOpening
+
+if TYPE_CHECKING:
+    from fxagent.regime.classifier import Regime
 from fxagent.strategies.base import (
     MarketContext,
     Signal,
@@ -94,7 +98,11 @@ class SessionBreakout(Strategy):
     def required_bars(self) -> int:
         return REQUIRED_BARS
 
-    def generate(self, bars: BarSeries, context: MarketContext) -> Signal | None:
+    def generate(
+        self, bars: BarSeries, context: MarketContext, regime: Regime | None = None
+    ) -> Signal | None:
+        """`regime` is accepted and ignored: this strategy's only gate is the session window,
+        and the router owns the trend condition. It measures no market state to duplicate."""
         if bars.timeframe != TIMEFRAME:
             raise ValueError(
                 f"{self.name} reads {TIMEFRAME} bars; got {bars.timeframe!r}. The caller "

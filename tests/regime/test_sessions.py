@@ -203,6 +203,62 @@ class TestSessionOpening:
             SessionOpening(Session.LONDON, 25)
 
 
+class TestMidnightGuard:
+    """A window crossing midnight UTC is refused where it is defined, not where it breaks.
+
+    `session_breakout._bars_on` groups a day's bars by UTC calendar date. A window straddling
+    midnight UTC would land its two halves on different dates, and the half on the far side
+    would simply not be seen — a partial range and a first-break rule with a blind spot,
+    neither of which raises anything.
+    """
+
+    def test_a_window_crossing_midnight_utc_is_refused(self) -> None:
+        """New York to 20:00 local is 01:00 UTC the next day in winter."""
+        with pytest.raises(ValueError, match="spans midnight UTC"):
+            SessionOpening(Session.NEW_YORK, 20)
+
+    def test_the_refusal_names_the_reason(self) -> None:
+        """Whoever hits this needs to know why, not just that it is disallowed."""
+        with pytest.raises(ValueError, match="_bars_on"):
+            SessionOpening(Session.NEW_YORK, 22)
+
+    def test_a_window_ending_exactly_at_midnight_utc_is_allowed(self) -> None:
+        """19:00 EST is 00:00 UTC; the last permitted instant is still the previous UTC day."""
+        assert SessionOpening(Session.NEW_YORK, 19).before_local_hour == 19
+
+    @pytest.mark.parametrize(
+        "opening",
+        [
+            (Session.LONDON, 12),
+            (Session.LONDON, 17),
+            (Session.TOKYO, 12),
+            (Session.TOKYO, 18),
+            (Session.NEW_YORK, 17),
+        ],
+    )
+    def test_realistic_windows_are_unaffected(self, opening: tuple[Session, int]) -> None:
+        session, hour = opening
+        assert SessionOpening(session, hour)
+
+    def test_the_shared_london_morning_passes_its_own_guard(self) -> None:
+        """Constructing LONDON_MORNING at import time already proved this; pin it anyway."""
+        assert SessionOpening(Session.LONDON, 12) == LONDON_MORNING
+
+    def test_the_guard_checks_both_halves_of_the_year(self) -> None:
+        """New York to 20:00 local crosses in winter and not in summer, so it must be refused.
+
+        This is the case that proves both probes are consulted. On EDT the window ends at
+        23:59 UTC the same day and looks fine; only on EST does it run to 00:59 the next day.
+        A guard that sampled one date would pass this window straight through.
+        """
+        with pytest.raises(ValueError, match="spans midnight UTC"):
+            SessionOpening(Session.NEW_YORK, 20)
+
+    def test_tokyo_can_never_cross_because_its_session_opens_at_midnight_utc(self) -> None:
+        """The control. 09:00 JST is 00:00 UTC, so every Tokyo window fits inside one UTC day."""
+        assert SessionOpening(Session.TOKYO, 24)
+
+
 class TestNaiveDatetimesAreRejected:
     @pytest.mark.parametrize(
         "call",

@@ -121,6 +121,15 @@ class SessionOpening:
             raise ValueError(
                 f"before_local_hour must be an hour of the day, got {self.before_local_hour}"
             )
+        if _spans_utc_midnight(self.session, self.before_local_hour):
+            raise ValueError(
+                f"{self.session} before {self.before_local_hour}:00 local spans midnight UTC. "
+                "session_breakout groups a day's bars with `_bars_on`, which keys on the UTC "
+                "calendar date, so a window straddling midnight UTC would silently drop every "
+                "bar on the far side of it — the range would be measured from a partial day "
+                "and the first-break rule would not see breaks it should. Refusing here, where "
+                "the window is defined, rather than there, where the bars quietly go missing."
+            )
 
     def permits(self, moment: datetime) -> bool:
         """Is `moment` inside this session and still before the local cutoff?
@@ -135,6 +144,35 @@ class SessionOpening:
     def local_hour(self, moment: datetime) -> int:
         """The hour `moment` reads as on this session's own clock. 11:00 UTC is 12 in July."""
         return local_time(moment, SESSION_WINDOWS[self.session].zone).hour
+
+
+#: Probe dates for the midnight check: one either side of the DST line, so a window is
+#: judged in both offsets a session can sit at rather than whichever one today happens to be.
+_WINTER_PROBE = date(2026, 1, 15)
+_SUMMER_PROBE = date(2026, 7, 15)
+
+
+def _spans_utc_midnight(session: Session, before_local_hour: int) -> bool:
+    """Would this window cross midnight UTC in either half of the year?
+
+    An empty window — a cutoff at or before the session's own open — crosses nothing and is
+    reported as safe; `permits` simply never returns True for it.
+    """
+    window = SESSION_WINDOWS[session]
+    zone = window.tzinfo()
+
+    for probe in (_WINTER_PROBE, _SUMMER_PROBE):
+        opens = datetime.combine(probe, window.opens, tzinfo=zone)
+        # Built from local midnight so hour 24 stays expressible, unlike `time(24)`.
+        cutoff = datetime.combine(probe, time(0), tzinfo=zone) + timedelta(hours=before_local_hour)
+        if cutoff <= opens:
+            continue
+        # The last permitted instant, not the exclusive bound: a window closing exactly at
+        # midnight UTC ends on the previous UTC day and is fine.
+        last_instant = cutoff.astimezone(UTC) - timedelta(microseconds=1)
+        if opens.astimezone(UTC).date() != last_instant.date():
+            return True
+    return False
 
 
 #: The window `session_breakout` trades and the router permits it in. One object, two callers.
@@ -171,7 +209,15 @@ def local_time(moment: datetime, zone: str) -> datetime:
 
 
 def is_market_open(moment: datetime) -> bool:
-    """Is FX trading at `moment`? Sunday 21:00 UTC through Friday 21:00 UTC."""
+    """Is FX trading at `moment`? Sunday 21:00 UTC through Friday 21:00 UTC.
+
+    **These UTC hour comparisons are correct — do not "fix" them into a local zone.** Every
+    other boundary in this module is a business day in a named city and must be converted;
+    this one is not. The weekly open and close are a broker convention observed in UTC, they
+    belong to no exchange's working hours, and CLAUDE.md records them in UTC because that is
+    how they are actually kept. Reading them through `Europe/London` or any other zone would
+    move the Friday close by an hour every summer and invent a bug where there is none.
+    """
     utc = _require_aware(moment)
     weekday = utc.weekday()
 
