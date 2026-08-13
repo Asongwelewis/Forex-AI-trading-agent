@@ -1,0 +1,134 @@
+name: Health
+
+# The daily "is anything actually running?" check.
+#
+# Every other failure in this system announces itself. This one does not: if the hourly
+# schedule stops firing — GitHub disabled it for inactivity, a cron change never reached the
+# default branch, the platform dropped the trigger — nothing fails, nothing alerts, and the
+# dashboard keeps showing yesterday's numbers as though they were today's. The only way to
+# notice is to go looking on a separate schedule, which is this.
+#
+# It sends a Telegram summary on every run, pass or fail. A check that only speaks up when
+# something is wrong is itself a thing that can silently stop, and then its silence is
+# indistinguishable from good news.
+
+on:
+  schedule:
+    # 06:23 UTC — after the overnight hours have had time to accumulate, before the London
+    # session opens, and off the top of the hour for the same queueing reason as the hourly.
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: health
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Daily health report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      HEALTH_SYMBOLS: ${{ vars.HEALTH_SYMBOLS || 'EURUSD,GBPUSD,EURGBP' }}
+      HEALTH_SOURCE: ${{ vars.HEALTH_SOURCE || 'twelvedata' }}
+      HEALTH_TIMEFRAME: ${{ vars.HEALTH_TIMEFRAME || 'H1' }}
+      HEALTH_WINDOW_HOURS: ${{ vars.HEALTH_WINDOW_HOURS || '24' }}
+      SUMMARY_FILE: health-summary.txt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # TWELVEDATA_API_KEY is optional here on purpose: without it the credit check reports
+      # UNAVAILABLE and the rest of the report still goes out. The hourly workflow treats it
+      # as required, so a missing key is already alerted on every hour — no gap.
+      - name: Check required secrets
+        env:
+          REQUIRED_SECRETS: SUPABASE_DB_URL TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+          OPTIONAL_SECRETS: TWELVEDATA_API_KEY
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/check-secrets.sh
+
+      # The checks deliberately do not import fxagent — see the header of health-report.sh.
+      # That means no uv, no dependency install, and no shared failure mode with the pipeline
+      # being checked; it just needs a Postgres client and jq. Both ship in the runner image,
+      # so this is a guard against an image change rather than an expected install.
+      - name: Ensure psql and jq
+        run: |
+          set -euo pipefail
+          missing=""
+          command -v psql >/dev/null || missing="${missing} postgresql-client"
+          command -v jq   >/dev/null || missing="${missing} jq"
+          if [ -n "${missing}" ]; then
+            echo "Runner image is missing:${missing} — installing."
+            sudo apt-get update -qq
+            # shellcheck disable=SC2086
+            sudo apt-get install -y -qq ${missing}
+          fi
+          psql --version
+          jq --version
+
+      # GitHub disables scheduled workflows on a repository with no commit activity for 60
+      # days, and a workflow *run* does not reset that clock — only a commit does. So the
+      # thing most likely to switch this pipeline off is measured here and warned about at 45.
+      - name: Measure repository inactivity
+        id: activity
+        run: |
+          set -euo pipefail
+          last=$(git log -1 --format=%ct)
+          days=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "Last commit on ${{ github.ref_name }}: ${days} day(s) ago."
+          echo "days=${days}" >> "$GITHUB_OUTPUT"
+
+      - name: Run health checks
+        id: checks
+        # The report must be delivered even when a check fails — that is the whole point of
+        # this workflow. The job is failed at the end instead, after Telegram has the news.
+        continue-on-error: true
+        env:
+          DAYS_SINCE_LAST_COMMIT: ${{ steps.activity.outputs.days }}
+        run: bash .github/scripts/health-report.sh
+
+      - name: Load summary
+        id: summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -s "${SUMMARY_FILE}" ]; then
+            # The script crashed before writing anything. Say so rather than sending nothing:
+            # a missing daily message is exactly the silence this workflow exists to break.
+            printf '%s\n' \
+              "FX agent health — CHECK CRASHED" \
+              "" \
+              "health-report.sh produced no summary, so the state of the pipeline is unknown." \
+              > "${SUMMARY_FILE}"
+          fi
+          {
+            echo 'text<<HEALTH_SUMMARY_EOF'
+            cat "${SUMMARY_FILE}"
+            echo ""
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo 'HEALTH_SUMMARY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send summary
+        if: always()
+        uses: ./.github/actions/notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          text: ${{ steps.summary.outputs.text }}
+
+      # Now that the report is out, reflect its verdict in the run status so the Actions tab
+      # and any branch protection see a red run rather than a green one with bad news in it.
+      - name: Fail the run if unhealthy
+        if: steps.checks.outcome == 'failure'
+        run: |
+          echo "::error title=Health check failed::See the Telegram summary and the step log above."
+          exit 1

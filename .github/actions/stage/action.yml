@@ -1,0 +1,62 @@
+name: Run a pipeline stage
+description: >
+  Run `python -m <module> --once`, or skip loudly when that module has no entry point yet.
+
+  The three stages land in separate phases. A workflow that hard-fails on the ones not yet
+  built would leave the cron red for weeks, and a permanently red cron is indistinguishable
+  from a broken one — which defeats the whole point of alerting on failure. So a missing
+  stage is a visible ::warning annotation and a green run; a stage that exists and fails is
+  a real failure. Nothing here needs editing when a phase lands.
+
+inputs:
+  module:
+    description: Importable module path, e.g. fxagent.collector.
+    required: true
+  args:
+    description: Arguments passed to the module.
+    required: false
+    default: "--once"
+
+outputs:
+  skipped:
+    description: '"true" when the module had no __main__ and nothing was run.'
+    value: ${{ steps.run.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run
+      id: run
+      shell: bash
+      env:
+        MODULE: ${{ inputs.module }}
+        STAGE_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+
+        # find_spec on the __main__ submodule, not the package: fxagent.collector can exist
+        # as a directory with no entry point, and `python -m` on that fails confusingly.
+        # A missing parent package raises rather than returning None, hence the catch.
+        exists=$(uv run python - "$MODULE" <<'PY'
+        import importlib.util
+        import sys
+
+        try:
+            found = importlib.util.find_spec(f"{sys.argv[1]}.__main__") is not None
+        except (ImportError, AttributeError, ValueError):
+            found = False
+        print("yes" if found else "no")
+        PY
+        )
+
+        if [ "$exists" != "yes" ]; then
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+          echo "::warning title=Stage not built yet::${MODULE} has no __main__ module, so that phase has not landed. Skipping it rather than failing the run."
+          exit 0
+        fi
+
+        echo "skipped=false" >> "$GITHUB_OUTPUT"
+        echo "Running: python -m ${MODULE} ${STAGE_ARGS}"
+        # Unquoted on purpose: STAGE_ARGS is a caller-supplied argument list that must word-split.
+        # shellcheck disable=SC2086
+        uv run python -m "$MODULE" $STAGE_ARGS

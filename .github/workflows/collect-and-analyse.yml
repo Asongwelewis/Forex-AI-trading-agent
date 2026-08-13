@@ -1,0 +1,148 @@
+name: Collect and analyse
+
+# The hourly pass. Collector, analyst and resolver are not daemons — they wake, work for a
+# minute and exit — so a scheduler is all the "deployment" this system needs. No VPS, no
+# container to keep alive, no Windows box, £0.
+#
+# Four properties of GitHub's scheduler that this file is built around:
+#
+#   1. **Scheduled triggers are best-effort.** A run can be delayed 30+ minutes at peak, and
+#      can be dropped entirely. Hence :07 rather than :00, and hence nothing downstream may
+#      treat the alert timestamp as meaningful. This system does not place orders (CLAUDE.md
+#      hard rule 1), so a late recommendation is an inconvenience, never a bad fill.
+#   2. **Five minutes is the floor** between runs. Irrelevant at H1; a hard limit if M5 is
+#      ever wanted.
+#   3. **Inactivity disables schedules** after 60 days without commits. health.yml warns at 45.
+#   4. **Only the default branch's copy of this file is scheduled.** This is on a phase branch,
+#      so cron does nothing until it reaches `main`. workflow_dispatch is what makes it
+#      testable before then — and several people report cron not activating at all until the
+#      first manual run.
+
+on:
+  schedule:
+    # 07 past the hour. The top of the hour is when every cron on the platform fires at once
+    # and the queue backs up; a few minutes off it measurably reduces the delay.
+    #
+    # This runs 24/7, which is ~744 runs a month. At 1–2 minutes each that is 750–1500 of the
+    # 2,000 free Linux minutes a private repository gets. To trim it to market hours, swap the
+    # single entry below for these two — FX runs Sunday 21:00 UTC to Friday 21:00 UTC, and the
+    # Sunday range spans 21–23 because the New York open is 21:00 UTC in winter and 22:00 in
+    # summer:
+    #   - cron: '7 * * * 1-5'
+    #   - cron: '7 21-23 * * 0'
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: Which stages to run
+        type: choice
+        default: all
+        options: [all, collect-only, analyse-only, resolve-only]
+
+# A run must never overlap its predecessor. The collector re-fetches overlapping windows and
+# upserts on `bars_unique`, and the analyst is idempotent per bar, so a double-write converges
+# rather than corrupting — but two runs racing on the same hour still burns Twelve Data credits
+# twice and can emit the same recommendation to Telegram twice.
+#
+# cancel-in-progress is false on purpose: killing a run mid-write to chase the newer one is
+# strictly worse than letting it finish. GitHub queues at most one pending run and discards
+# older pending ones, which is the behaviour we want — a run queued two hours ago has nothing
+# left to say.
+concurrency:
+  group: collect-and-analyse
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    name: Hourly pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # Store
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # Data
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      CALENDAR_USER_AGENT: ${{ vars.CALENDAR_USER_AGENT || 'fx-regime-agent/0.1' }}
+      # Alerts
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Agents. All three are optional by design: if every provider is unreachable the
+      # deterministic template explanation is used and the pass completes normally.
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # Runtime
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Before anything touches the network or the store. An unset secret is the empty string
+      # in Actions, not an error, so without this the run dies later with a message about a
+      # malformed DSN instead of one naming the secret nobody set.
+      - name: Check required secrets
+        env:
+          REQUIRED_SECRETS: SUPABASE_DB_URL TWELVEDATA_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+          OPTIONAL_SECRETS: GEMINI_API_KEY GROQ_API_KEY NVIDIA_API_KEY
+        run: bash .github/scripts/check-secrets.sh
+
+      - uses: ./.github/actions/setup
+
+      # --------------------------------------------------------------------------------
+      # The pass. Each stage is short-lived and idempotent: running it twice for the same
+      # bar converges to one signal rather than two (hard rule 8), which is what makes a
+      # best-effort scheduler safe to build on. A skipped hour needs no catch-up path —
+      # the collector's overlapping re-fetch covers the hole on the next run.
+      # --------------------------------------------------------------------------------
+      - name: Collect bars and events
+        id: collect
+        if: ${{ inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'collect-only' }}
+        uses: ./.github/actions/stage
+        with:
+          module: fxagent.collector
+
+      # Only on fresh data. An analyst run over a stale store produces a recommendation that
+      # looks current and is not — worse than no recommendation at all.
+      - name: Analyse and send recommendations
+        id: analyse
+        if: ${{ !cancelled() && steps.collect.conclusion != 'failure' && (inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'analyse-only') }}
+        uses: ./.github/actions/stage
+        with:
+          module: fxagent.analyst
+
+      # Independent of the analyst: resolving *past* signals against the bars that have since
+      # arrived is bookkeeping, and skipping it because today's analysis failed just compounds
+      # the backlog. It does need the collector to have succeeded — with no new bars there is
+      # nothing to resolve against.
+      - name: Resolve open signals
+        id: resolve
+        if: ${{ !cancelled() && steps.collect.conclusion != 'failure' && (inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'resolve-only') }}
+        uses: ./.github/actions/stage
+        with:
+          module: fxagent.resolve
+
+      # --------------------------------------------------------------------------------
+      # A scheduled job that silently stops firing is the main operational risk here, so the
+      # failure path is part of the deliverable and not an afterthought. Plain curl, no
+      # fxagent import: the notifier must not share a failure mode with the thing it reports.
+      # --------------------------------------------------------------------------------
+      - name: Alert on failure
+        if: failure()
+        uses: ./.github/actions/notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          text: |
+            ❌ FX agent hourly pass FAILED
+
+            collect : ${{ steps.collect.conclusion || 'not reached' }}
+            analyse : ${{ steps.analyse.conclusion || 'not reached' }}
+            resolve : ${{ steps.resolve.conclusion || 'not reached' }}
+
+            No recommendation was sent for this hour.
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
