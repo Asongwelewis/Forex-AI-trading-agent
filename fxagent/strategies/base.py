@@ -16,14 +16,24 @@ the only thing that makes a backtest worth reading.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import TYPE_CHECKING
 
 import pandas as pd
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fxagent.adapters.base import BarSeries, OrderSide
+# `UtcDatetime` is imported, not redefined. It used to be declared here as well, character for
+# character, which is two definitions of "reject naive datetimes" that would have had to be
+# corrected in two places. The adapter layer owns it because that is where a timestamp first
+# enters the system.
+from fxagent.adapters.base import BarSeries, OrderSide, UtcDatetime
+
+if TYPE_CHECKING:
+    # Type-checking only, and deliberately so: `regime.classifier` imports this module, so a
+    # runtime import here would close the loop. `from __future__ import annotations` keeps the
+    # annotation a string, and no strategy needs the class itself — only attributes off an
+    # instance the caller supplies.
+    from fxagent.regime.classifier import Regime
 
 __all__ = [
     "MarketContext",
@@ -34,15 +44,6 @@ __all__ = [
     "order_side_for",
 ]
 
-
-def _ensure_utc(value: datetime) -> datetime:
-    """Reject naive datetimes and normalise aware ones to UTC."""
-    if value.tzinfo is None:
-        raise ValueError("timestamp must be timezone-aware; naive datetimes are rejected")
-    return value.astimezone(UTC)
-
-
-UtcDatetime = Annotated[datetime, AfterValidator(_ensure_utc)]
 
 #: What a strategy may record as a diagnostic. Scalars only, so a signal stays JSON-safe
 #: and the journal in Phase 8 can store `reasoning` without a custom encoder.
@@ -190,11 +191,19 @@ def bars_to_frame(bars: BarSeries) -> pd.DataFrame:
 
 
 class Strategy(ABC):
-    """A pure function from (bars, context) to an opinion.
+    """A pure function from (bars, context, regime) to an opinion.
 
     `generate` returns `None` for "this setup is not present", which is distinct from a
-    FLAT `Signal` meaning "I have looked and I want no exposure". The regime router in
-    Phase 5 needs both: silence does not count towards consensus, an explicit FLAT does.
+    FLAT `Signal` meaning "I have looked and I want no exposure". The regime router
+    needs both: silence does not count towards consensus, an explicit FLAT does.
+
+    **`regime` is optional in the contract and mandatory to whoever reads it.** A strategy
+    that gates on market state must not measure that state itself — `range_reversion` asking
+    "is this a range" with its own ADX gave a second definition of ranging that could drift
+    from the one the router gates on. Taking the classifier's answer instead means the two
+    read one boolean. Strategies that gate on nothing the classifier measures simply ignore
+    the argument, which is why it defaults rather than being required of all three; the ones
+    that do read it raise on a missing or mismatched regime rather than going quietly silent.
     """
 
     @property
@@ -212,7 +221,9 @@ class Strategy(ABC):
         """
 
     @abstractmethod
-    def generate(self, bars: BarSeries, context: MarketContext) -> Signal | None:
+    def generate(
+        self, bars: BarSeries, context: MarketContext, regime: Regime | None = None
+    ) -> Signal | None:
         """Produce a signal, or `None` if the setup or its gates are not satisfied."""
 
     def _has_enough_history(self, bars: BarSeries) -> bool:

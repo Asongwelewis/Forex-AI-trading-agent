@@ -13,6 +13,12 @@ timestamp we return. Detection needs a *live* quote: offset and staleness are th
 measurement seen from one tick, so a quote that no timezone explains is rejected rather than
 read as a timezone. Do not assume a value per broker — read the clock in Market Watch.
 
+**A freshly subscribed symbol serves a stale tick first.** `symbol_select` returns before any
+data flows, and until it does the terminal replays its last cached tick for that symbol — days
+old if the symbol was not already in Market Watch. Detection therefore polls for a live quote
+instead of judging the first one it is handed, and `MT5_CLOCK_SYMBOL` can point it at a 24/7
+instrument so the offset is still readable at the weekend.
+
 **numpy scalars are not Python scalars.** `copy_rates_*` returns a structured array whose
 fields are `numpy.float64` / `numpy.uint64`. Those do not serialise to JSON, so every value
 is coerced at the boundary.
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, TracebackType
 from typing import Any
@@ -58,6 +65,20 @@ OFFSET_GRANULARITY = timedelta(minutes=30)
 #: the offset read from it would shift every timestamp we return. Must stay far below half
 #: of OFFSET_GRANULARITY, or a genuine offset would be rejected as staleness.
 MAX_QUOTE_LAG = timedelta(seconds=30)
+
+#: How long detection waits for the first *live* tick after subscribing a symbol.
+#:
+#: `symbol_select` returns as soon as the subscription is registered, not when data starts
+#: flowing. Until the first live tick arrives the terminal serves whatever it last cached for
+#: that symbol, and on a cold Market Watch that can be days old. Reading it once and failing
+#: on the staleness check rejects a healthy connection in the middle of the London session —
+#: measured doing exactly that on a Thursday at 17:21 UTC, against a three-day-old cached
+#: EURUSDm tick. So poll, and let the staleness guard judge a tick that had a chance to
+#: arrive. The guard itself is unchanged: this fixes what it is shown, not what it accepts.
+TICK_WARMUP = timedelta(seconds=3)
+
+#: Gap between polls while waiting for that first live tick.
+TICK_POLL_INTERVAL = timedelta(milliseconds=250)
 
 
 class MT5Error(RuntimeError):
@@ -159,7 +180,9 @@ class MT5LocalAdapter:
         symbol_suffix: str = "",
         server_utc_offset: timedelta | None = None,
         reference_symbol: str = "EURUSD",
+        clock_symbol: str | None = None,
         deviation_points: int = 20,
+        tick_warmup: timedelta = TICK_WARMUP,
     ) -> None:
         self._login = login
         self._password = password
@@ -168,7 +191,11 @@ class MT5LocalAdapter:
         self._symbol_suffix = symbol_suffix
         self._configured_offset = server_utc_offset
         self._reference_symbol = reference_symbol
+        #: Read the broker clock from here. A 24/7 instrument keeps detection working at
+        #: weekends, when every FX symbol's last tick is by definition stale.
+        self._clock_symbol = clock_symbol or reference_symbol
         self._deviation_points = deviation_points
+        self._tick_warmup = tick_warmup
 
         self._mt5: ModuleType | None = None
         self._server_utc_offset: timedelta | None = None
@@ -215,6 +242,7 @@ class MT5LocalAdapter:
             symbol_suffix=source.get("MT5_SYMBOL_SUFFIX", ""),
             server_utc_offset=offset,
             reference_symbol=reference,
+            clock_symbol=source.get("MT5_CLOCK_SYMBOL", "").strip() or None,
             deviation_points=int(source.get("MT5_DEVIATION_POINTS", "20")),
         )
 
@@ -316,38 +344,43 @@ class MT5LocalAdapter:
             )
 
     def _resolve_server_offset(self) -> timedelta:
-        """Use the configured offset, else detect it from the broker clock."""
+        """Use the configured offset, else detect it from the broker clock.
+
+        Polls for a live quote rather than trusting the first one returned. See `TICK_WARMUP`:
+        subscribing a symbol does not mean data has arrived, and the cached tick served in the
+        meantime can be days old even while the market is busy.
+        """
         if self._configured_offset is not None:
             return self._configured_offset
 
-        mt5 = self._terminal()
-        symbol = self._select(self._reference_symbol)
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
+        symbol = self._select(self._clock_symbol)
+        best = self._poll_for_clock(symbol)
+        if best is None:
             raise MT5ConnectionError(
                 f"cannot read a quote for {symbol} to detect the server time offset. Set "
                 "MT5_SERVER_UTC_OFFSET_HOURS explicitly to skip detection."
             )
 
-        raw = datetime.fromtimestamp(int(tick.time), UTC) - datetime.now(UTC)
-        offset = _snap_offset(raw)
+        offset, lag = best
         if abs(offset) > MAX_PLAUSIBLE_OFFSET:
             raise MT5ConnectionError(
                 f"detected an implausible server time offset of {offset} from the last "
                 f"{symbol} quote. The quote is stale, most likely because the market is "
-                "closed. Set MT5_SERVER_UTC_OFFSET_HOURS explicitly — read the clock in the "
-                "terminal's Market Watch rather than assuming a value for the broker."
+                f"closed — it did not go live within {_describe_lag(self._tick_warmup)} of "
+                "subscribing. Set MT5_SERVER_UTC_OFFSET_HOURS explicitly — read the clock in "
+                "the terminal's Market Watch rather than assuming a value for the broker. "
+                "MT5_CLOCK_SYMBOL can point detection at a 24/7 instrument instead."
             )
 
-        lag = offset - raw
         if abs(lag) > MAX_QUOTE_LAG:
             raise MT5ConnectionError(
                 f"the last {symbol} quote is {_describe_lag(lag)} away from the nearest "
                 f"half-hour offset ({offset}), more than the {_describe_lag(MAX_QUOTE_LAG)} "
                 "allowed. No timezone explains that gap, so the quote is stale and any offset "
-                "inferred from it would shift every timestamp. The market is most likely "
-                "closed. Reconnect when it is open, or set MT5_SERVER_UTC_OFFSET_HOURS "
-                "explicitly to skip detection."
+                "inferred from it would shift every timestamp. It stayed stale for "
+                f"{_describe_lag(self._tick_warmup)} after subscribing, so the market is most "
+                "likely closed. Reconnect when it is open, set MT5_CLOCK_SYMBOL to a 24/7 "
+                "instrument, or set MT5_SERVER_UTC_OFFSET_HOURS explicitly to skip detection."
             )
 
         logger.debug(
@@ -355,10 +388,49 @@ class MT5LocalAdapter:
         )
         return offset
 
+    def _poll_for_clock(self, symbol: str) -> tuple[timedelta, timedelta] | None:
+        """Read `symbol` until a tick passes both guards, or the warm-up budget runs out.
+
+        Returns the `(offset, lag)` of the tick that passed, or of the last one read if none
+        did — the latest read being the one the caller should explain the failure with. None
+        if no tick was served at all.
+
+        Deliberately not "the tick with the smallest lag": a badly stale quote snaps to an
+        offset three days wide and lands within a second of that grid point, so lag alone
+        ranks it as good as a live tick. Plausibility is what separates them, and that is the
+        caller's check.
+        """
+        mt5 = self._terminal()
+        deadline = time.monotonic() + self._tick_warmup.total_seconds()
+        latest: tuple[timedelta, timedelta] | None = None
+
+        while True:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is not None and int(tick.time) > 0:
+                raw = datetime.fromtimestamp(int(tick.time), UTC) - datetime.now(UTC)
+                offset = _snap_offset(raw)
+                latest = (offset, offset - raw)
+                if abs(offset) <= MAX_PLAUSIBLE_OFFSET and abs(latest[1]) <= MAX_QUOTE_LAG:
+                    return latest
+
+            if time.monotonic() >= deadline:
+                return latest
+            time.sleep(TICK_POLL_INTERVAL.total_seconds())
+
     @property
     def reference_symbol(self) -> str:
-        """Symbol used for offset detection; the first entry of MT5_SYMBOLS."""
+        """First entry of MT5_SYMBOLS. The default clock symbol, but not necessarily it."""
         return self._reference_symbol
+
+    @property
+    def clock_symbol(self) -> str:
+        """Symbol the server offset is read from — MT5_CLOCK_SYMBOL, else the reference.
+
+        Worth pointing at a crypto CFD: they quote 24/7, so detection still works at the
+        weekend when every FX symbol's most recent tick is hours or days old and the
+        staleness guard can only refuse.
+        """
+        return self._clock_symbol
 
     @property
     def server_utc_offset(self) -> timedelta:

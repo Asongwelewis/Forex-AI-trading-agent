@@ -13,6 +13,7 @@ true on the bar being replayed, not the one that is true now.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from fxagent.adapters.base import BarSeries
 from fxagent.indicators import atr, ema
@@ -23,6 +24,9 @@ from fxagent.strategies.base import (
     Strategy,
     bars_to_frame,
 )
+
+if TYPE_CHECKING:
+    from fxagent.regime.classifier import Regime
 
 __all__ = ["CarryDivergence"]
 
@@ -50,7 +54,11 @@ class CarryDivergence(Strategy):
         """The EMA seed plus one more bar to measure a slope across."""
         return max(EMA_PERIOD + SLOPE_LOOKBACK, ATR_PERIOD + 1)
 
-    def generate(self, bars: BarSeries, context: MarketContext) -> Signal | None:
+    def generate(
+        self, bars: BarSeries, context: MarketContext, regime: Regime | None = None
+    ) -> Signal | None:
+        """`regime` is accepted and ignored: this strategy gates on the rate differential
+        and its own EMA slope, neither of which the classifier measures."""
         if bars.timeframe != TIMEFRAME:
             raise ValueError(
                 f"{self.name} reads {TIMEFRAME} bars; got {bars.timeframe!r}. Carry is a "
