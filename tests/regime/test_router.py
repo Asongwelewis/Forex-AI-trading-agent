@@ -17,7 +17,7 @@ from fxagent.regime.router import (
     RegimeRouter,
     RouterConfig,
 )
-from fxagent.regime.sessions import Session
+from fxagent.regime.sessions import LONDON_MORNING, Session, SessionOpening
 from tests.regime.builders import regime_at
 
 TRENDING = 30.0  # above the 25 threshold
@@ -145,10 +145,24 @@ class TestSlateIsTotal:
 
 
 class TestConfigValidation:
-    def test_overlap_cannot_anchor_a_local_time_rule(self) -> None:
-        with pytest.raises(ValueError, match="no business hours of its own"):
-            RouterConfig(breakout_session=Session.OVERLAP)
-
     def test_weights_must_be_fractions(self) -> None:
         with pytest.raises(ValueError, match=r"must sit in \[0, 1\]"):
             RouterConfig(carry_weight=1.5)
+
+    def test_the_breakout_window_is_the_shared_object_by_default(self) -> None:
+        """Not a copy with equal fields — the same definition the strategy imports."""
+        assert RouterConfig().breakout_window is LONDON_MORNING
+
+    def test_retuning_the_window_moves_the_router(self) -> None:
+        early = RouterConfig(breakout_window=SessionOpening(Session.LONDON, 10))
+        moment = datetime(2026, 1, 15, 11, tzinfo=UTC)
+        assert (
+            RegimeRouter().weights(regime_at(moment, trend_strength=TRENDING))[SESSION_BREAKOUT]
+            == 1.0
+        )
+        assert (
+            RegimeRouter(early).weights(regime_at(moment, trend_strength=TRENDING))[
+                SESSION_BREAKOUT
+            ]
+            == 0.0
+        )

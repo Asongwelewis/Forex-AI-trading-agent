@@ -28,8 +28,10 @@ from fxagent.regime.router import (
     RouterConfig,
 )
 from fxagent.regime.sessions import (
+    LONDON_MORNING,
     SESSION_WINDOWS,
     Session,
+    SessionOpening,
     SessionWindow,
     active_sessions,
     dominant_session,
@@ -41,6 +43,7 @@ from fxagent.regime.sessions import (
 
 __all__ = [
     "CARRY_DIVERGENCE",
+    "LONDON_MORNING",
     "RANGE_REVERSION",
     "SESSION_BREAKOUT",
     "SESSION_WINDOWS",
@@ -55,6 +58,7 @@ __all__ = [
     "RegimeRouter",
     "RouterConfig",
     "Session",
+    "SessionOpening",
     "SessionWindow",
     "active_sessions",
     "dominant_session",

@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fxagent.regime.classifier import Regime
-from fxagent.regime.sessions import SESSION_WINDOWS, Session, local_time
+from fxagent.regime.sessions import LONDON_MORNING, Session, SessionOpening
 
 __all__ = [
     "CARRY_DIVERGENCE",
@@ -40,10 +40,10 @@ CARRY_DIVERGENCE = "carry_divergence"
 class RouterConfig:
     """Every number and session reference the routing rules read."""
 
-    #: session_breakout trades the open of this session, in this session's own local time.
-    breakout_session: Session = Session.LONDON
-    #: Exclusive. 12 means the last permitted bar opens at 11:00 local.
-    breakout_before_local_hour: int = 12
+    #: The window session_breakout is permitted in. The *same object* the strategy consults,
+    #: so the router cannot permit an hour the strategy is silent in. Replacing it here moves
+    #: both sides at once, which is the point.
+    breakout_window: SessionOpening = LONDON_MORNING
     breakout_weight: float = 1.0
 
     #: range_reversion needs a quiet market, so the busiest hours of the day disqualify it.
@@ -57,11 +57,8 @@ class RouterConfig:
     require_market_open: bool = True
 
     def __post_init__(self) -> None:
-        if not 0 <= self.breakout_before_local_hour <= 24:
-            raise ValueError(
-                f"breakout_before_local_hour must be an hour of the day, got "
-                f"{self.breakout_before_local_hour}"
-            )
+        # The breakout window validates itself in SessionOpening.__post_init__; there is
+        # nothing left to check here that would not be checking it twice.
         for name, weight in (
             ("breakout_weight", self.breakout_weight),
             ("reversion_weight", self.reversion_weight),
@@ -69,11 +66,6 @@ class RouterConfig:
         ):
             if not 0.0 <= weight <= 1.0:
                 raise ValueError(f"{name} must sit in [0, 1], got {weight}")
-        if self.breakout_session is Session.OVERLAP:
-            raise ValueError(
-                "OVERLAP has no business hours of its own, so it cannot anchor a local-time "
-                "rule; name the session whose clock the rule means"
-            )
 
 
 class RegimeRouter:
@@ -102,15 +94,16 @@ class RegimeRouter:
         }
 
     def _breakout_weight(self, regime: Regime) -> float:
-        """The session's opening hours, in that session's own local time, and only in a trend."""
+        """The shared opening window, and only in a trend.
+
+        The window question goes to `SessionOpening.permits` rather than being re-derived
+        from `regime.sessions` here, so the router and the strategy answer it with one
+        implementation instead of two that agree until they do not.
+        """
         config = self._config
-        if not regime.in_session(config.breakout_session):
+        if not config.breakout_window.permits(regime.timestamp):
             return 0.0
         if not regime.is_trending:
-            return 0.0
-
-        zone = SESSION_WINDOWS[config.breakout_session].zone
-        if local_time(regime.timestamp, zone).hour >= config.breakout_before_local_hour:
             return 0.0
         return config.breakout_weight
 

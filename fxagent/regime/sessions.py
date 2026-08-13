@@ -34,7 +34,9 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 __all__ = [
+    "LONDON_MORNING",
     "Session",
+    "SessionOpening",
     "SessionWindow",
     "WEEKLY_CLOSE_HOUR_UTC",
     "WEEKLY_OPEN_HOUR_UTC",
@@ -91,6 +93,52 @@ SESSION_WINDOWS: dict[Session, SessionWindow] = {
     Session.LONDON: SessionWindow(Session.LONDON, "Europe/London", time(8, 0), time(17, 0)),
     Session.NEW_YORK: SessionWindow(Session.NEW_YORK, "America/New_York", time(8, 0), time(17, 0)),
 }
+
+
+@dataclass(frozen=True)
+class SessionOpening:
+    """The opening slice of a session, expressed in that session's own local time.
+
+    This exists so that "the London morning" has exactly one definition. The router decides
+    whether `session_breakout` may speak, and `session_breakout` decides whether it has
+    anything to say; before this type they each computed the window from their own constants
+    and disagreed by an hour every summer — the router permitting 07:00-10:59 UTC while the
+    strategy only spoke from 08:00. Both now call `permits` on the same object, so the two
+    windows cannot drift apart without the shared definition moving under both of them.
+    """
+
+    session: Session
+    #: Exclusive, in local time. 12 means the last permitted bar opens at 11:00 local.
+    before_local_hour: int
+
+    def __post_init__(self) -> None:
+        if self.session is Session.OVERLAP:
+            raise ValueError(
+                "OVERLAP has no business hours of its own, so it cannot anchor a local-time "
+                "rule; name the session whose clock the rule means"
+            )
+        if not 0 <= self.before_local_hour <= 24:
+            raise ValueError(
+                f"before_local_hour must be an hour of the day, got {self.before_local_hour}"
+            )
+
+    def permits(self, moment: datetime) -> bool:
+        """Is `moment` inside this session and still before the local cutoff?
+
+        Takes the instant rather than a precomputed regime so a strategy — which has no
+        `Regime` — reaches the same answer through the same code as the router.
+        """
+        if self.session not in active_sessions(moment):
+            return False
+        return self.local_hour(moment) < self.before_local_hour
+
+    def local_hour(self, moment: datetime) -> int:
+        """The hour `moment` reads as on this session's own clock. 11:00 UTC is 12 in July."""
+        return local_time(moment, SESSION_WINDOWS[self.session].zone).hour
+
+
+#: The window `session_breakout` trades and the router permits it in. One object, two callers.
+LONDON_MORNING = SessionOpening(Session.LONDON, 12)
 
 #: FX opens Sunday 21:00 UTC and closes Friday 21:00 UTC. See the module docstring for why
 #: these two, alone, are UTC constants.

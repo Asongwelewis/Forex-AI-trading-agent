@@ -13,7 +13,9 @@ from datetime import UTC, date, datetime
 import pytest
 
 from fxagent.regime.sessions import (
+    LONDON_MORNING,
     Session,
+    SessionOpening,
     active_sessions,
     dominant_session,
     is_market_open,
@@ -170,6 +172,35 @@ class TestActiveSessions:
         self, active: frozenset[Session], expected: Session | None
     ) -> None:
         assert dominant_session(active) is expected
+
+
+class TestSessionOpening:
+    """The shared window definition. One object, consulted by both the router and the strategy."""
+
+    def test_the_london_morning_shifts_with_the_london_clock(self) -> None:
+        """The property that was violated: 07:00 UTC is inside the window only in summer."""
+        assert LONDON_MORNING.permits(datetime(2026, 7, 15, 7, tzinfo=UTC)) is True
+        assert LONDON_MORNING.permits(datetime(2026, 1, 15, 7, tzinfo=UTC)) is False
+
+    def test_the_cutoff_is_local_not_utc(self) -> None:
+        """11:00 UTC is noon in London in July, so the window has already shut."""
+        assert LONDON_MORNING.permits(datetime(2026, 1, 15, 11, tzinfo=UTC)) is True
+        assert LONDON_MORNING.permits(datetime(2026, 7, 15, 11, tzinfo=UTC)) is False
+
+    def test_local_hour_reports_the_session_clock(self) -> None:
+        assert LONDON_MORNING.local_hour(datetime(2026, 1, 15, 11, tzinfo=UTC)) == 11
+        assert LONDON_MORNING.local_hour(datetime(2026, 7, 15, 11, tzinfo=UTC)) == 12
+
+    def test_a_shut_market_permits_nothing(self) -> None:
+        assert LONDON_MORNING.permits(datetime(2026, 1, 17, 9, tzinfo=UTC)) is False
+
+    def test_overlap_cannot_anchor_a_local_time_rule(self) -> None:
+        with pytest.raises(ValueError, match="no business hours of its own"):
+            SessionOpening(Session.OVERLAP, 12)
+
+    def test_the_cutoff_must_be_an_hour_of_the_day(self) -> None:
+        with pytest.raises(ValueError, match="must be an hour of the day"):
+            SessionOpening(Session.LONDON, 25)
 
 
 class TestNaiveDatetimesAreRejected:

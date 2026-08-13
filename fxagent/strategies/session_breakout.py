@@ -4,9 +4,22 @@ Tokyo grinds out a range while London sleeps; when London arrives, the first hou
 that leaves that range is the setup. Everything here is decided from the bars themselves,
 including which UTC day is "today" — the strategy never reads a clock.
 
+**The breakout window is not ours to define.** It comes from `regime.sessions.LONDON_MORNING`
+— the same object the router gates on — because a strategy that decides for itself when
+London opens will disagree with the router that decides whether it may speak. It did: fixed
+UTC hours here meant the router permitted 07:00-10:59 UTC every summer while this file only
+spoke from 08:00, losing the first permitted hour and offering a signal in an hour the router
+refused. Deriving the window rather than restating it makes that class of drift unavailable.
+
+**The two windows are asymmetric, and deliberately so.** London's hours move against UTC
+twice a year, so the breakout window must be derived. Tokyo's do not — Japan has observed no
+daylight saving since 1951 — so the pre-London range genuinely is fixed in UTC and is left
+alone. Shifting both would have been symmetry for its own sake, and would have moved a window
+that was never wrong.
+
 Three refusals matter as much as the entry:
 
-* Outside 08:00-12:00 UTC there is no setup, so the strategy is silent. Later breakouts
+* Outside the London morning there is no setup, so the strategy is silent. Later breakouts
   are a different animal driven by New York, not by London's open.
 * If an earlier bar in the window already closed outside the range, the move is not new
   and we do not chase it. Only the *first* close beyond the range trades.
@@ -21,6 +34,11 @@ from datetime import date
 
 from fxagent.adapters.base import Bar, BarSeries
 from fxagent.indicators import atr
+
+# Imported from the leaf module rather than the `fxagent.regime` package on purpose:
+# `regime.sessions` imports nothing from fxagent, so this stays safe in both directions even
+# though `regime.consensus` imports `strategies.base`.
+from fxagent.regime.sessions import LONDON_MORNING, SessionOpening
 from fxagent.strategies.base import (
     MarketContext,
     Signal,
@@ -32,11 +50,12 @@ from fxagent.strategies.base import (
 __all__ = ["SessionBreakout"]
 
 #: Asian range is measured from bars OPENING in [00:00, 07:00) UTC, i.e. hours 0-6.
+#:
+#: Legitimately fixed in UTC, unlike the breakout window. Asia/Tokyo is UTC+9 the whole year
+#: round, so these bars are the same local hours in January and July. The window also ends
+#: exactly as London opens in summer, and an hour before it in winter — it never overlaps the
+#: session it is supposed to precede.
 ASIAN_HOURS: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
-
-#: A signal is only offered on a bar opening in [08:00, 12:00) UTC.
-BREAKOUT_FIRST_HOUR = 8
-BREAKOUT_LAST_HOUR = 11
 
 ATR_PERIOD = 14
 #: Stop distance ceiling. The range's far side is used instead whenever it is nearer.
@@ -57,6 +76,16 @@ def _bars_on(bars: BarSeries, day: date) -> list[Bar]:
 class SessionBreakout(Strategy):
     """First H1 close outside the Asian range, taken in the direction of the break."""
 
+    def __init__(self, window: SessionOpening = LONDON_MORNING) -> None:
+        #: Pass the router's own `RouterConfig.breakout_window` to keep them aligned when
+        #: either is tuned. The default is the shared object, so they start aligned.
+        self._window = window
+
+    @property
+    def window(self) -> SessionOpening:
+        """The session window this strategy will speak in. The router gates on the same one."""
+        return self._window
+
     @property
     def name(self) -> str:
         return "session_breakout"
@@ -75,7 +104,7 @@ class SessionBreakout(Strategy):
             return None
 
         last = bars.bars[-1]
-        if not BREAKOUT_FIRST_HOUR <= last.timestamp.hour <= BREAKOUT_LAST_HOUR:
+        if not self._window.permits(last.timestamp):
             return None
 
         session_range = self._asian_range(bars, last.timestamp.date())
@@ -127,6 +156,10 @@ class SessionBreakout(Strategy):
                 "stop_source": stop_source,
                 "risk_distance": risk,
                 "breakout_hour_utc": last.timestamp.hour,
+                # The local hour is the one the rule is actually written in; logging only
+                # the UTC hour makes a summer signal look an hour early forever after.
+                "breakout_hour_local": self._window.local_hour(last.timestamp),
+                "breakout_session": str(self._window.session),
             },
         )
 
@@ -149,11 +182,16 @@ class SessionBreakout(Strategy):
     def _already_broke_out(
         self, bars: BarSeries, last: Bar, range_high: float, range_low: float
     ) -> bool:
-        """True if a bar earlier in today's window already closed outside the range."""
+        """True if a bar earlier in today's window already closed outside the range.
+
+        "Earlier in the window" is asked of the same `permits` the entry gate uses, so the
+        first-break rule covers exactly the hours a signal could have been offered in — not
+        an hour more in winter or one fewer in summer.
+        """
         earlier = [
             bar
             for bar in _bars_on(bars, last.timestamp.date())
-            if BREAKOUT_FIRST_HOUR <= bar.timestamp.hour < last.timestamp.hour
+            if bar.timestamp < last.timestamp and self._window.permits(bar.timestamp)
         ]
         return any(bar.close > range_high or bar.close < range_low for bar in earlier)
 
