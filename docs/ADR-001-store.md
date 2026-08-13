@@ -35,8 +35,9 @@ needed as well, as `SUPABASE_DB_URL`. Supabase > Settings > Database has it.
 ## Consequences
 
 **Use the Session pooler (port 5432 on `*.pooler.supabase.com`) unless the host has IPv6.**
-Supabase's direct database host is IPv6-only. Oracle Always Free ARM instances do not reliably
-have IPv6, so the direct string will fail there while working on a developer laptop.
+Supabase's direct database host is IPv6-only, and GitHub-hosted Actions runners have no IPv6
+address, so the direct string works on a developer laptop and fails in every scheduled run.
+This is not optional now that CI is the only runtime — see `docs/ADR-002-scheduling.md`.
 
 **Port 6543 is the Transaction pooler and behaves differently.** It is pgbouncer in transaction
 mode: prepared statements do not survive between statements. `DatabaseConfig` detects the port
