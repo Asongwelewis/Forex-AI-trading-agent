@@ -16,14 +16,17 @@ the only thing that makes a backtest worth reading.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING
 
 import pandas as pd
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fxagent.adapters.base import BarSeries, OrderSide
+# `UtcDatetime` is imported, not redefined. It used to be declared here as well, character for
+# character, which is two definitions of "reject naive datetimes" that would have had to be
+# corrected in two places. The adapter layer owns it because that is where a timestamp first
+# enters the system.
+from fxagent.adapters.base import BarSeries, OrderSide, UtcDatetime
 
 if TYPE_CHECKING:
     # Type-checking only, and deliberately so: `regime.classifier` imports this module, so a
@@ -41,15 +44,6 @@ __all__ = [
     "order_side_for",
 ]
 
-
-def _ensure_utc(value: datetime) -> datetime:
-    """Reject naive datetimes and normalise aware ones to UTC."""
-    if value.tzinfo is None:
-        raise ValueError("timestamp must be timezone-aware; naive datetimes are rejected")
-    return value.astimezone(UTC)
-
-
-UtcDatetime = Annotated[datetime, AfterValidator(_ensure_utc)]
 
 #: What a strategy may record as a diagnostic. Scalars only, so a signal stays JSON-safe
 #: and the journal in Phase 8 can store `reasoning` without a custom encoder.

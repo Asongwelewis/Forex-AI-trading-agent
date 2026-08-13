@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from fxagent.adapters.base import BarSeries
+from fxagent.adapters.base import BarSeries, UtcDatetime
 from fxagent.indicators import adx, atr, rolling_percentile
 from fxagent.regime.sessions import (
     Session,
@@ -29,7 +29,7 @@ from fxagent.regime.sessions import (
     is_market_open,
     minutes_until_close,
 )
-from fxagent.strategies.base import UtcDatetime, bars_to_frame
+from fxagent.strategies.base import bars_to_frame
 
 __all__ = ["ClassifierConfig", "Regime", "RegimeClassifier"]
 

@@ -27,8 +27,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fxagent.adapters.base import UtcDatetime
 from fxagent.regime.classifier import Regime
-from fxagent.strategies.base import Signal, SignalDirection, UtcDatetime
+from fxagent.strategies.base import Signal, SignalDirection
 
 __all__ = [
     "Consensus",
