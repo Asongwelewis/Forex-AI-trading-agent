@@ -37,6 +37,22 @@ runs:
           exit 1
         fi
 
+        # Strip surrounding whitespace. A secret pasted through a browser very often carries a
+        # trailing newline, and it lands in the request URL path where it produces a 404 that
+        # looks identical to a genuinely wrong token.
+        BOT_TOKEN=$(printf '%s' "${BOT_TOKEN}" | tr -d '[:space:]')
+        CHAT_ID=$(printf '%s' "${CHAT_ID}" | tr -d '[:space:]')
+
+        # Shape check before spending a request. A malformed token is by far the most common
+        # cause of a 404 here, and "HTTP 404 Not Found" gives no clue which of the two secrets
+        # is at fault. The id half (before the colon) is the bot's public user id, not a
+        # credential, so echoing it is safe and is the fastest way to spot the wrong bot.
+        token_id=${BOT_TOKEN%%:*}
+        if ! printf '%s' "${BOT_TOKEN}" | grep -qE '^[0-9]{6,16}:[A-Za-z0-9_-]{30,}$'; then
+          echo "::error title=TELEGRAM_BOT_TOKEN is malformed::The secret is ${#BOT_TOKEN} characters and does not match a Telegram token (digits, a colon, then ~35 more characters). The usual cause is pasting BotFather's whole line — 'Use this token to access the HTTP API:' — instead of just the token, or copying only part of it. Re-copy the token alone."
+          exit 1
+        fi
+
         body_file=$(mktemp)
         trap 'rm -f "${body_file}"' EXIT
 
@@ -70,7 +86,22 @@ runs:
         if [ "${status}" != "200" ]; then
           # The response body carries Telegram's own description (bad chat_id, bot blocked,
           # unauthorized). It does not contain the token, so it is safe to surface.
-          echo "::error title=Telegram send failed::HTTP ${status}: $(cat /tmp/telegram-response.json 2>/dev/null | cut -c1-500)"
+          detail=$(cat /tmp/telegram-response.json 2>/dev/null | head -c 500)
+
+          # Telegram's status codes each mean one specific thing here, and the raw JSON says
+          # none of it. "404 Not Found" in particular reads like a broken URL when it actually
+          # means the token does not belong to any bot -- which sent us looking in the wrong
+          # place once already.
+          case "${status}" in
+            404) hint="Telegram did not recognise the request URL. A merely wrong-but-well-formed token answers 401, not 404, so a 404 past the shape check above means TELEGRAM_BOT_TOKEN contains hidden or stray characters — a zero-width space, a smart quote, an embedded newline. It claimed bot id ${token_id}. Delete the secret and retype the token rather than pasting it." ;;
+            401) hint="the token was rejected as unauthorized, which normally means it has been revoked. Issue a fresh one in BotFather." ;;
+            400) hint="the request was rejected. If the description mentions 'chat not found', TELEGRAM_CHAT_ID is wrong; if it mentions UTF-8, the message body was corrupted before sending." ;;
+            403) hint="the bot is not allowed to message that chat. Open Telegram and send the bot a message first -- a bot can never start a conversation -- and confirm it has not been blocked." ;;
+            000) hint="no HTTP response at all, so this is a network or DNS failure reaching api.telegram.org rather than a credential problem." ;;
+            *)   hint="unexpected status; the description below is Telegram's own." ;;
+          esac
+
+          echo "::error title=Telegram send failed (HTTP ${status})::${hint} Response: ${detail}"
           exit 1
         fi
 
