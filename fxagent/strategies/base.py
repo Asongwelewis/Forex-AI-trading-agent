@@ -15,7 +15,10 @@ the only thing that makes a backtest worth reading.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -37,7 +40,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_CROWDING_PENALTY",
+    "POSITIONING_OFF",
     "MarketContext",
+    "PositioningConfig",
     "Signal",
     "SignalDirection",
     "Strategy",
@@ -119,20 +124,73 @@ class MarketContext(BaseModel):
         return cls(rate_differential=0.0, macro_bias=0.0, positioning_score=0.0)
 
 
-#: The most confidence crowding may remove. A quarter is enough to reorder two otherwise
-#: comparable setups and far too little to stand in for a gate, which is the point: positioning
-#: is confirmation, and a number that could suppress a trade on its own would be a trigger with
-#: the sign flipped.
+#: The most confidence crowding may remove *once it is switched on*. A quarter is enough to
+#: reorder two otherwise comparable setups and far too little to stand in for a gate, which is
+#: the point: positioning is confirmation, and a number that could suppress a trade on its own
+#: would be a trigger with the sign flipped.
 MAX_CROWDING_PENALTY = 0.25
+
+
+@dataclass(frozen=True)
+class PositioningConfig:
+    """Whether COT crowding may touch a confidence, and by how much. **Default off.**
+
+    Off because an unmeasured modifier in the deterministic path corrupts the thing it would
+    later be judged against. Phase 8 has not produced a baseline yet, and a first backtest run
+    with crowding already applied cannot answer "what did crowding do" — there is nothing to
+    difference it against, and every subsequent measurement inherits the contamination. Turning
+    it on is a deliberate act that produces a measured delta against a clean baseline.
+
+    **Disabled does not mean absent.** `positioning_score` is still computed, still travels on
+    `MarketContext`, and is still written to `reasoning` and to the consensus diagnostics — it
+    simply does not multiply anything. That is the whole point: the journal accumulates the
+    input while the baseline stays clean, so the delta can be computed from stored data rather
+    than from a second backtest run months later.
+
+    Frozen, and passed in rather than read from a module-level global, so two strategies in one
+    process can differ and a test never has to mutate shared state to get a deterministic run.
+    """
+
+    enabled: bool = False
+    max_penalty: float = MAX_CROWDING_PENALTY
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.max_penalty < 1.0:
+            raise ValueError(
+                f"max_penalty must be in [0, 1), got {self.max_penalty}; a penalty of 1.0 could "
+                "zero a confidence and turn confirmation into a veto"
+            )
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> PositioningConfig:
+        """Read `FX_POSITIONING_ENABLED`. Anything but an explicit truthy value is off.
+
+        Defaulting to off on an unrecognised value is deliberate: a typo in a deployment
+        variable must not silently switch a modifier into the decision path.
+        """
+        source = os.environ if env is None else env
+        raw = str(source.get("FX_POSITIONING_ENABLED", "")).strip().lower()
+        return cls(enabled=raw in {"1", "true", "yes", "on"})
+
+
+#: The default everywhere. A named constant rather than a bare `PositioningConfig()` at each
+#: call site, so "which paths have crowding off" is one grep.
+POSITIONING_OFF = PositioningConfig(enabled=False)
 
 
 def crowding_confidence_factor(
     direction: SignalDirection,
     positioning_score: float,
     *,
-    max_penalty: float = MAX_CROWDING_PENALTY,
+    config: PositioningConfig = POSITIONING_OFF,
 ) -> float:
     """How much of a signal's confidence survives the crowd, in [1 - max_penalty, 1].
+
+    Returns exactly 1.0 while `config.enabled` is false, which is the default — so every caller
+    that has not opted in multiplies by one and produces bit-identical output to the code that
+    existed before crowding did. The validation below still runs when disabled: an out-of-range
+    score is an upstream bug either way, and a flag that also suppressed error checking would
+    hide it until the day someone flipped the flag.
 
     Crowding is only ever an argument *against*. Buying what everyone already owns leaves fewer
     marginal buyers and a thinner exit, so a LONG into a +0.9 percentile is worth less than the
@@ -145,8 +203,11 @@ def crowding_confidence_factor(
     """
     if not -1.0 <= positioning_score <= 1.0:
         raise ValueError(f"positioning_score must be in [-1, 1], got {positioning_score}")
-    if not 0.0 <= max_penalty < 1.0:
-        raise ValueError(f"max_penalty must be in [0, 1), got {max_penalty}")
+
+    if not config.enabled:
+        return 1.0
+
+    max_penalty = config.max_penalty
 
     if direction is SignalDirection.LONG:
         crowding = max(0.0, positioning_score)

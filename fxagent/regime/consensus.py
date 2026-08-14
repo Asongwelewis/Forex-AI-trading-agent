@@ -18,13 +18,19 @@ A trade needs both thresholds: enough summed weight *and* enough separate strate
 alone would let one fully-weighted strategy trade by itself, which is the single-signal
 failure mode CLAUDE.md rules out; count alone would ignore the router entirely.
 
-**Positioning is applied after the decision, never to it.** `positioning_score` reaches
-`evaluate` as an optional argument and touches exactly one number: the confidence on a signal
-that has already qualified. It is not summed into weight, is not counted as a vote, and is
-absent from the threshold comparison entirely — read the code below and the two `if` statements
-that decide whether a trade happens do not mention it. That placement is the whole safety
-argument: crowding is a weekly survey with an indirect read-through to spot, so it may grade a
-decision the deterministic core has made and may not make one.
+**Positioning is applied after the decision, never to it — and by default not at all.**
+`positioning_score` reaches `evaluate` as an optional argument and touches exactly one number:
+the confidence on a signal that has already qualified. It is not summed into weight, is not
+counted as a vote, and is absent from the threshold comparison entirely — read the code below
+and the two `if` statements that decide whether a trade happens do not mention it. That
+placement is the whole safety argument: crowding is a weekly survey with an indirect
+read-through to spot, so it may grade a decision the deterministic core has made and may not
+make one.
+
+`PositioningConfig` defaults to disabled, so the confidence this class reports is currently
+bit-identical to what it reported before crowding existed. The score is still recorded in the
+diagnostics on both the firing and the rejection path, which is what will make it possible to
+measure the modifier against a clean baseline instead of guessing at it.
 """
 
 from __future__ import annotations
@@ -37,7 +43,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fxagent.adapters.base import UtcDatetime
 from fxagent.regime.classifier import Regime
-from fxagent.strategies.base import Signal, SignalDirection, crowding_confidence_factor
+from fxagent.strategies.base import (
+    POSITIONING_OFF,
+    PositioningConfig,
+    Signal,
+    SignalDirection,
+    crowding_confidence_factor,
+)
 
 __all__ = [
     "Consensus",
@@ -125,12 +137,22 @@ class ConsensusResult(BaseModel):
 class Consensus:
     """Applies the agreement rules to a slate of votes. Pure; reads no clock and no bars."""
 
-    def __init__(self, config: ConsensusConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ConsensusConfig | None = None,
+        *,
+        positioning: PositioningConfig = POSITIONING_OFF,
+    ) -> None:
         self._config = config or ConsensusConfig()
+        self._positioning = positioning
 
     @property
     def config(self) -> ConsensusConfig:
         return self._config
+
+    @property
+    def positioning(self) -> PositioningConfig:
+        return self._positioning
 
     def evaluate(
         self,
@@ -159,6 +181,7 @@ class Consensus:
 
         diagnostics = self._diagnostics(regime, votes, totals)
         diagnostics["positioning_score"] = positioning_score
+        diagnostics["positioning_enabled"] = self._positioning.enabled
 
         if not qualifying:
             diagnostics["reason"] = self._explain_failure(totals)
@@ -180,7 +203,9 @@ class Consensus:
         # Everything below grades the result. Keeping the two apart is what makes the claim in
         # the module docstring checkable by reading rather than by testing every combination.
         agreed_confidence = _weighted_confidence(winners)
-        crowding = crowding_confidence_factor(direction, positioning_score)
+        crowding = crowding_confidence_factor(
+            direction, positioning_score, config=self._positioning
+        )
 
         diagnostics["fired"] = True
         diagnostics["winning_direction"] = str(direction)

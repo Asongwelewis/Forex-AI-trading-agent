@@ -325,19 +325,28 @@ async def test_poll_writes_reports_and_then_declines_to_refetch(session) -> None
     repo = CotRepository(session)
     source = Recording()
 
-    written = await poll(repo, source=source)  # type: ignore[arg-type]
+    result = await poll(repo, source=source)  # type: ignore[arg-type]
     await session.commit()
-    assert written == 4
+    assert result.written == 4
+    assert result.fetched == 4
+    assert result.skipped is False
     assert Recording.calls == 1
 
-    # A second run the same day must read the store's `fetched_at` and stand down.
-    assert await poll(repo, source=source) == 0  # type: ignore[arg-type]
+    # A second run the same day must read the store's `fetched_at` and stand down. Skipped is
+    # not a failure: the workflow would otherwise alert every time the cache did its job.
+    second = await poll(repo, source=source)  # type: ignore[arg-type]
+    assert second.skipped is True
+    assert second.is_failure is False
     assert Recording.calls == 1
 
-    # A day later it is due again.
+    # --force is the escape hatch for a human re-running a failed job the same day.
+    await poll(repo, source=source, force=True)  # type: ignore[arg-type]
+    assert Recording.calls == 2
+
+    # A day later it is due again without being asked twice.
     tomorrow = datetime.now(UTC) + timedelta(days=1, minutes=1)
     await poll(repo, source=source, now=tomorrow)  # type: ignore[arg-type]
-    assert Recording.calls == 2
+    assert Recording.calls == 3
 
 
 @pytest.mark.db
@@ -359,5 +368,10 @@ async def test_poll_leaves_the_store_untouched_when_the_fetch_comes_back_empty(
     await repo.upsert_many([_report(TUESDAY, long=10, short=5).as_row()])
     await session.commit()
 
-    assert await poll(repo, source=Empty()) == 0  # type: ignore[arg-type]
+    result = await poll(repo, source=Empty(), force=True)  # type: ignore[arg-type]
+
+    assert result.written == 0
     assert await repo.count_visible(FRIDAY_RELEASE) == 1
+    # An empty fetch is the one outcome the scheduled job must alert on: it means the
+    # accumulation clock has stopped, which is otherwise discovered years later.
+    assert result.is_failure is True

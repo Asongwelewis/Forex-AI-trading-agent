@@ -43,7 +43,10 @@ side. See `carry_divergence` and `regime.consensus` for the two places it is rea
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import logging
+import sys
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -66,6 +69,7 @@ __all__ = [
     "CotHistory",
     "CotReport",
     "PairPositioning",
+    "PollResult",
     "percentile_rank",
     "poll",
     "publication_time",
@@ -652,14 +656,36 @@ def _to_report(row: dict[str, Any]) -> CotReport | None:
 # -- the write path ------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class PollResult:
+    """What one poll did. Three outcomes, and two of them write nothing.
+
+    A bare row count could not tell "the cache said don't bother" from "the CFTC answered with
+    nothing usable", and those need opposite responses: the first is the system working, the
+    second is the accumulation clock stopping. The scheduled job alerts on exactly one of them,
+    so the distinction has to survive out of this function rather than being reconstructed from
+    a zero.
+    """
+
+    written: int = 0
+    fetched: int = 0
+    skipped: bool = False
+
+    @property
+    def is_failure(self) -> bool:
+        """True only when a fetch actually happened and came back empty."""
+        return not self.skipped and self.fetched == 0
+
+
 async def poll(
     repository: Any,
     *,
     source: CftcCotSource | None = None,
     now: datetime | None = None,
     min_interval: timedelta = DEFAULT_MIN_FETCH_INTERVAL,
-) -> int:
-    """Refresh the store if a fetch is due, and return how many rows were written.
+    force: bool = False,
+) -> PollResult:
+    """Refresh the store if a fetch is due.
 
     The cache that matters is this one. Every entrypoint in this system is short-lived — a cron
     run, not a daemon (docs/ADR-002-scheduling.md) — so an in-process interval guard is empty on
@@ -667,15 +693,19 @@ async def poll(
     survive the process boundary, and it is why `CotRepository.latest_fetch_at` reads `fetched_at`
     rather than `published_at`.
 
+    `force` exists for the one case the interval gets wrong: a human re-running a failed job the
+    same day. The guard would correctly report "fetched recently" and correctly do nothing, and
+    the operator would correctly conclude the tool was broken.
+
     Typed as `Any` for the repository because importing `CotRepository` at module level would
     have this module depend on the store, which nothing else in `fundamentals` does at import
     time. The caller has one already.
     """
     moment = now or datetime.now(UTC)
     last = await repository.latest_fetch_at()
-    if not should_fetch(last, now=moment, min_interval=min_interval):
+    if not force and not should_fetch(last, now=moment, min_interval=min_interval):
         logger.info("COT last fetched %s, inside the %s interval; skipping", last, min_interval)
-        return 0
+        return PollResult(skipped=True)
 
     owned = source is None
     fetcher = source or CftcCotSource()
@@ -687,6 +717,80 @@ async def poll(
 
     if not reports:
         logger.warning("CFTC returned no usable reports; leaving the store untouched")
-        return 0
+        return PollResult(fetched=0)
 
-    return await repository.upsert_many(report.as_row() for report in reports)
+    written = await repository.upsert_many(report.as_row() for report in reports)
+    return PollResult(written=written, fetched=len(reports))
+
+
+# -- entrypoint ----------------------------------------------------------------
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m fxagent.fundamentals.cot",
+        description="Poll the CFTC Commitments of Traders report. Computes no signal.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Poll once and exit. The only supported mode; accepted for symmetry with the "
+        "collector and the observations poller, whose workflows invoke them the same way.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Fetch even if the store was refreshed inside the last day. For re-running a "
+        "failed job by hand, where the cache would otherwise correctly do nothing.",
+    )
+    parser.add_argument("--log-level", default="INFO")
+    return parser.parse_args(argv)
+
+
+async def _run(*, force: bool) -> int:
+    from fxagent.store import Database, apply_migrations
+    from fxagent.store.repositories import CotRepository
+
+    database = Database.from_env()
+    try:
+        async with database.connect() as connection:
+            applied = await apply_migrations(connection)
+        if applied:
+            logger.info("applied %d migration(s)", len(applied))
+
+        async with database.session() as session:
+            result = await poll(CotRepository(session), force=force)
+            await session.commit()
+
+        if result.skipped:
+            # Not a failure. A weekly cron never trips this, but a same-day manual re-run does,
+            # and exiting non-zero there would alert on the cache doing its job.
+            logger.info("COT is already current; nothing to do")
+            return 0
+
+        if result.is_failure:
+            # The source fails soft per request, so reaching zero means the fetch itself failed
+            # or the dataset changed shape. Loud, for the same reason as the observations job:
+            # a positioning history that quietly stopped growing is discovered three years late,
+            # when the percentile everyone assumed was ranking against 156 weeks is ranking
+            # against 40.
+            logger.error("no COT reports fetched — the positioning history is not accumulating")
+            return 1
+
+        logger.info("stored %d row(s) from %d report(s)", result.written, result.fetched)
+        return 0
+    finally:
+        await database.dispose()
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    return asyncio.run(_run(force=args.force))
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by the workflow
+    sys.exit(main())

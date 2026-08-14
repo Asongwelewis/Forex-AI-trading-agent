@@ -13,13 +13,16 @@ import pytest
 
 from fxagent.regime.consensus import Consensus, ConsensusConfig
 from fxagent.regime.router import CARRY_DIVERGENCE, RANGE_REVERSION, SESSION_BREAKOUT
-from fxagent.strategies.base import SignalDirection
+from fxagent.strategies.base import PositioningConfig, SignalDirection
 from tests.regime.builders import regime_at, signal
 
 MOMENT = datetime(2026, 1, 15, 9, 0, tzinfo=UTC)
 LONG = SignalDirection.LONG
 SHORT = SignalDirection.SHORT
 FLAT = SignalDirection.FLAT
+
+#: Crowding is off by default, so every test asserting its arithmetic opts in explicitly.
+POSITIONING_ON = PositioningConfig(enabled=True)
 
 #: A slate where the breakout is fully weighted and carry is half — the normal London morning.
 OPEN_SLATE = {SESSION_BREAKOUT: 1.0, RANGE_REVERSION: 0.0, CARRY_DIVERGENCE: 0.5}
@@ -239,15 +242,19 @@ class TestPositioning:
 
     def test_omitting_positioning_behaves_exactly_as_before(self) -> None:
         """The default must be inert, or every existing caller silently changes behaviour."""
-        without = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
-        neutral = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=0.0)
+        without = Consensus(positioning=POSITIONING_ON).evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        neutral = Consensus(positioning=POSITIONING_ON).evaluate(
+            _regime(), self.AGREED, OPEN_SLATE, positioning_score=0.0
+        )
 
         assert without.signal is not None and neutral.signal is not None
         assert without.signal.confidence == pytest.approx(neutral.signal.confidence)
 
     def test_crowding_discounts_the_agreed_confidence(self) -> None:
-        plain = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
-        crowded = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0)
+        plain = Consensus(positioning=POSITIONING_ON).evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        crowded = Consensus(positioning=POSITIONING_ON).evaluate(
+            _regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0
+        )
 
         assert plain.signal is not None and crowded.signal is not None
         assert crowded.signal.confidence < plain.signal.confidence
@@ -255,20 +262,24 @@ class TestPositioning:
     def test_positioning_never_turns_a_rejection_into_a_trade(self) -> None:
         """The failure that would matter. A single strategy must stay a single strategy."""
         for score in (-1.0, -0.5, 0.0, 0.5, 1.0):
-            result = Consensus().evaluate(_regime(), self.LONE, OPEN_SLATE, positioning_score=score)
+            result = Consensus(positioning=POSITIONING_ON).evaluate(
+                _regime(), self.LONE, OPEN_SLATE, positioning_score=score
+            )
             assert result.fired is False, f"positioning {score} manufactured a trade"
 
     def test_positioning_never_turns_a_trade_into_a_rejection(self) -> None:
         """The mirror. A veto keyed on crowding would be a trigger with the sign flipped."""
         for score in (-1.0, -0.5, 0.0, 0.5, 1.0):
-            result = Consensus().evaluate(
+            result = Consensus(positioning=POSITIONING_ON).evaluate(
                 _regime(), self.AGREED, OPEN_SLATE, positioning_score=score
             )
             assert result.fired is True, f"positioning {score} suppressed a trade"
 
     def test_positioning_does_not_touch_weight_or_the_vote_count(self) -> None:
-        plain = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
-        crowded = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0)
+        plain = Consensus(positioning=POSITIONING_ON).evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        crowded = Consensus(positioning=POSITIONING_ON).evaluate(
+            _regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0
+        )
 
         assert plain.signal is not None and crowded.signal is not None
         assert crowded.signal.total_weight == pytest.approx(plain.signal.total_weight)
@@ -276,7 +287,9 @@ class TestPositioning:
         assert crowded.diagnostics["long_votes"] == plain.diagnostics["long_votes"]
 
     def test_the_discount_is_recorded_in_the_diagnostics(self) -> None:
-        result = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=0.8)
+        result = Consensus(positioning=POSITIONING_ON).evaluate(
+            _regime(), self.AGREED, OPEN_SLATE, positioning_score=0.8
+        )
 
         assert result.signal is not None
         assert result.diagnostics["positioning_score"] == pytest.approx(0.8)
@@ -284,9 +297,32 @@ class TestPositioning:
             result.diagnostics["confidence_before_crowding"] * result.diagnostics["crowding_factor"]
         )
 
+    def test_the_shipped_default_leaves_the_agreed_confidence_untouched(self) -> None:
+        """No baseline exists yet, so the modifier ships inert and must be provably inert.
+
+        Equality, not "close to": a Consensus built the ordinary way must produce the same
+        number at a three-year positioning extreme as it does at neutral, or the first
+        backtest is measuring crowding without anyone having decided to measure it.
+        """
+        plain = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        assert plain.signal is not None
+
+        for score in (-1.0, -0.5, 0.5, 1.0):
+            shipped = Consensus().evaluate(
+                _regime(), self.AGREED, OPEN_SLATE, positioning_score=score
+            )
+            assert shipped.signal is not None
+            assert shipped.signal.confidence == plain.signal.confidence, f"{score} moved it"
+            assert shipped.diagnostics["crowding_factor"] == 1.0
+            assert shipped.diagnostics["positioning_enabled"] is False
+            # Still recorded, so the delta can be computed from the journal later.
+            assert shipped.diagnostics["positioning_score"] == pytest.approx(score)
+
     def test_positioning_is_recorded_on_the_rejection_path_too(self) -> None:
         """The rejections are the product; a rejection that drops an input cannot be replayed."""
-        result = Consensus().evaluate(_regime(), self.LONE, OPEN_SLATE, positioning_score=-0.6)
+        result = Consensus(positioning=POSITIONING_ON).evaluate(
+            _regime(), self.LONE, OPEN_SLATE, positioning_score=-0.6
+        )
 
         assert result.fired is False
         assert result.diagnostics["positioning_score"] == pytest.approx(-0.6)

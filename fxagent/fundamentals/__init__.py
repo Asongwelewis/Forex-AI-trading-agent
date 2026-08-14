@@ -34,42 +34,30 @@ from fxagent.fundamentals.context import (
     split_symbol,
 )
 
-# Imported last: `cot` reaches back into `context` for `split_symbol`, so `context` must be
-# fully initialised before this line runs.
-from fxagent.fundamentals.cot import (  # noqa: E402 - see the comment above
-    CONTRACT_CODES,
-    COT_DATASET_URL,
-    CftcCotSource,
-    CotHistory,
-    CotReport,
-    PairPositioning,
-    percentile_rank,
-    publication_time,
-)
+# `cot` is deliberately NOT re-exported here, and it is the only source that is not.
+#
+# It reaches back into `context` for `split_symbol`, so importing it from this file would work
+# only while it stayed the last line — an ordering constraint that holds until someone sorts the
+# imports. Leaving it out makes the dependency one-directional by construction instead of by
+# convention, and it also keeps `python -m fxagent.fundamentals.cot` from importing the module
+# twice (once through this file, once as `__main__`), which runpy warns about on every scheduled
+# run. Import it directly: `from fxagent.fundamentals.cot import CotHistory`.
 
 __all__ = [
     "CALENDAR_URL",
-    "CONTRACT_CODES",
-    "COT_DATASET_URL",
     "DEFAULT_FEEDS",
     "IMPORTANCE_VALUES",
     "CentralBankFeed",
     "CentralBankRss",
-    "CftcCotSource",
-    "CotHistory",
-    "CotReport",
     "Event",
     "ForexFactoryCalendar",
     "FundamentalContext",
     "FundamentalSource",
-    "PairPositioning",
     "PolicyRate",
     "build_context",
     "fetch_all",
     "fetch_safely",
     "parse_value",
-    "percentile_rank",
-    "publication_time",
     "rate_differential",
     "split_symbol",
     "surprise_score",
