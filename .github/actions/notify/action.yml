@@ -37,17 +37,33 @@ runs:
           exit 1
         fi
 
-        # Telegram caps a message at 4096 characters and rejects longer ones outright,
-        # which would turn a real alert into silence. Truncate rather than lose it.
-        body=$(printf '%s' "${TEXT}" | cut -c1-3900)
+        body_file=$(mktemp)
+        trap 'rm -f "${body_file}"' EXIT
 
+        # Telegram caps a message at 4096 characters and rejects longer ones outright, which
+        # would turn a real alert into silence. Truncate rather than lose it — but truncate
+        # carefully: `head -c` counts BYTES, and the summaries are full of multi-byte glyphs
+        # (✅ is 3 bytes, 🕒 is 4). Slicing one in half makes the whole payload invalid UTF-8,
+        # and Telegram answers that with "400 Bad Request: strings must be encoded in UTF-8" —
+        # the alert is lost to a truncation that only bites on the longest messages, which are
+        # the ones most likely to matter. `iconv -c` drops the partial sequence at the tail.
+        # iconv's stderr is discarded deliberately: "incomplete character at end of buffer" is
+        # not a fault here, it is the exact case -c exists to absorb, and letting it through
+        # puts a scary line in the log of every long alert.
+        printf '%s' "${TEXT}" | head -c 3900 | iconv -c -f UTF-8 -t UTF-8 2>/dev/null > "${body_file}"
+
+        # `text@file` makes curl read the bytes straight off disk. Passing the message as a
+        # command-line argument instead routes it through the platform's argument encoding,
+        # which corrupts multi-line non-ASCII text — verified: the identical body that fails
+        # as an argument succeeds byte-for-byte from a file. The file form has no such path,
+        # so the payload Telegram receives is exactly what health-report.sh wrote.
         status=$(curl --silent --show-error \
           --retry 3 --retry-connrefused --retry-delay 5 \
           --max-time 30 \
           --output /tmp/telegram-response.json \
           --write-out '%{http_code}' \
           --data-urlencode "chat_id=${CHAT_ID}" \
-          --data-urlencode "text=${body}" \
+          --data-urlencode "text@${body_file}" \
           --data "disable_web_page_preview=true" \
           "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage") || status="000"
 
