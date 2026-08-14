@@ -29,7 +29,9 @@ Claude Code cannot get these for you. Have them in a scratch file (not in the re
 - [ ] Exness demo account: login number, password, server name (e.g. `Exness-MT5Trial9`)
 - [ ] Google AI Studio API key — free, no card: https://aistudio.google.com/apikey
 - [ ] Groq API key (fallback) — free, no card: https://console.groq.com/keys
-- [ ] Finnhub API key (economic calendar) — free tier: https://finnhub.io/register
+- [ ] ~~Finnhub API key~~ — NOT NEEDED. Dropped in the Phase 5 teardown. `/calendar/economic`
+      is premium and returns HTTP 403 on a free key (verified 2026-08-10), and no code ever
+      called Finnhub. The calendar comes from Forex Factory's keyless weekly feed — see Phase 6.
 - [ ] Telegram bot token + your chat ID (Phase 8 — skip for now if short on time)
 - [ ] GitHub account with a new **private** empty repo created
 
@@ -137,7 +139,7 @@ This answer determines whether cloud hosting is possible later. Write it down.
 ```
 Create a new branch: phase/02-broker-adapter
 
-Implement src/adapters/base.py containing a BrokerAdapter Protocol (typing.Protocol) with
+Implement fxagent/adapters/base.py containing a BrokerAdapter Protocol (typing.Protocol) with
 these methods, all fully type-hinted, all returning Pydantic models defined in the same module:
 
 - get_bars(symbol: str, timeframe: str, count: int) -> BarSeries
@@ -151,7 +153,7 @@ IMPORTANT: OrderRequest MUST require stop_loss and take_profit as non-optional f
 structurally impossible to construct an order without them. Add a Pydantic validator that
 rejects a stop_loss on the wrong side of the entry price.
 
-Also create src/adapters/mock.py — a MockAdapter implementing the protocol against synthetic
+Also create fxagent/adapters/mock.py — a MockAdapter implementing the protocol against synthetic
 data, so strategies can be tested without MT5 running.
 
 Write tests covering: the SL-side validator rejects bad input, MockAdapter satisfies the
@@ -172,7 +174,7 @@ Run pytest and ruff. Show me the diff summary, then wait for my approval before 
 ```
 Create branch phase/03-mt5-adapter.
 
-Implement src/adapters/mt5_local.py — MT5LocalAdapter implementing BrokerAdapter using the
+Implement fxagent/adapters/mt5_local.py — MT5LocalAdapter implementing BrokerAdapter using the
 MetaTrader5 Python package.
 
 Requirements:
@@ -221,7 +223,7 @@ Merge phase/03-mt5-adapter into main with --no-ff, delete the branch, and push.
 ```
 Create branch phase/04-strategies.
 
-Implement src/strategies/. First create base.py with:
+Implement fxagent/strategies/. First create base.py with:
 - A Signal Pydantic model: symbol, direction (LONG/SHORT/FLAT), confidence (0-1),
   entry_price, stop_loss, take_profit, strategy_name, timestamp (UTC), and a
   reasoning: dict field for structured diagnostics.
@@ -267,7 +269,7 @@ fails. That negative test matters more than the positive one.
 ```
 Create branch phase/05-regime-router.
 
-Implement src/regime/:
+Implement fxagent/regime/:
 
 1. sessions.py — pure functions mapping a UTC datetime to the active session(s):
    TOKYO (00-09), LONDON (08-17), NEW_YORK (13-22), OVERLAP (13-17). Handle the Friday
@@ -313,7 +315,7 @@ check them against the session table in `CLAUDE.md`.
 ```
 Create branch phase/06-risk-and-permission.
 
-Part A — src/risk/sizing.py:
+Part A — fxagent/risk/sizing.py:
 - position_size(account_equity, risk_fraction, entry, stop_loss, symbol_spec) -> volume
   computed from stop distance in risk units, NOT fixed lots. Must handle JPY pairs and
   account-currency conversion correctly.
@@ -321,7 +323,7 @@ Part A — src/risk/sizing.py:
 - total_open_risk(positions) and a check that rejects a new trade pushing total risk above 2%.
 - Round volume down to the symbol's lot step, never up. Reject if below minimum lot.
 
-Part B — src/permission/grant.py:
+Part B — fxagent/permission/grant.py:
 A PermissionGrant Pydantic model with: allowed_symbols, max_trades, max_notional,
 expires_at (UTC), granted_at, and a revoked flag with revocation reason.
 
@@ -332,6 +334,39 @@ A GrantManager state machine with states ADVISORY / GRANTED / REVOKED and these 
 - Auto-revoke triggers, each producing a logged reason: daily loss exceeds 3% of starting
   equity, spread exceeds 3x its 20-period median, high-impact calendar event within 15
   minutes, three consecutive losses, broker heartbeat lost for >60s.
+Part C — fxagent/calendar/: the economic calendar behind the "high-impact event within 15
+minutes" auto-revoke. Write it ourselves; vibe-trading's Finnhub loader is US-equity
+dailies only.
+
+Finnhub's /calendar/economic is PREMIUM — verified 2026-08-10, it returns HTTP 403
+{"error":"You don't have access to this resource."} on our free key, while /quote,
+/calendar/earnings, /calendar/ipo and /country all return 200 on the same key. Do not
+retry it. Use Forex Factory's weekly JSON feed:
+
+  https://nfs.faireconomy.media/ff_calendar_thisweek.json
+
+Verified live: HTTP 200, a JSON array of 74 events, fields exactly
+{title, country, date, impact, forecast, previous}. Five things about it that will
+otherwise bite:
+
+1. `date` is ISO 8601 carrying a -04:00 offset (US Eastern), NOT UTC. Parse with
+   datetime.fromisoformat and .astimezone(UTC) immediately. Never strip the offset — it
+   shifts with US DST, and a 15-minute revoke window computed an hour out is worse than
+   no window at all.
+2. `country` holds a CURRENCY code (USD, EUR, JPY, GBP, AUD, NZD, CAD, CHF, CNY), not a
+   country. Match it against both legs of the pair being traded.
+3. `impact` has four values, not three: High, Medium, Low, and Holiday. A Pydantic enum
+   missing Holiday will reject the whole feed.
+4. There is no event ID. Deduplicate on (date, country, title).
+5. A User-Agent header is REQUIRED. Without one the host returns HTTP 429. The feed is
+   Cloudflare-fronted and sends no-cache headers, so cache to disk ourselves and back off
+   on 429 rather than polling.
+
+The feed covers the CURRENT WEEK ONLY; ff_calendar_nextweek.json is 404. So on a Friday
+the lookahead cannot see Sunday's open. Fail CLOSED: if the calendar is unavailable,
+stale, or the week has run out, treat the window as unsafe and refuse execution rather
+than assuming no event is due.
+
 - A kill_switch() method that revokes immediately and attempts to flatten all positions.
 - Persist grant state to disk so a process restart cannot silently resurrect a revoked grant.
   Fail closed: if state can't be read, assume ADVISORY.
@@ -355,7 +390,7 @@ this to place a trade I didn't authorize?" If Claude can't answer convincingly, 
 ```
 Create branch phase/07-backtest.
 
-Build src/backtest/ that replays historical MT5 bars through the full pipeline —
+Build fxagent/backtest/ that replays historical MT5 bars through the full pipeline —
 strategies, regime router, consensus, risk sizing — and records results.
 
 Cost model requirements (IMPORTANT — a backtest without these is invalid):
@@ -370,7 +405,7 @@ trade count, and a per-strategy breakdown so I can see which of the three is car
 Implement walk-forward validation: split the period into N folds, and report out-of-sample
 metrics separately from in-sample. Report BOTH. Never report a single in-sample number.
 
-Add a CLI: uv run python -m src.backtest --symbol EURUSD --from 2024-01-01 --to 2025-12-31
+Add a CLI: uv run python -m fxagent.backtest --symbol EURUSD --from 2024-01-01 --to 2025-12-31
 Output a summary table to stdout and write full trade-by-trade results to CSV.
 
 Run it on EURUSD H1 and show me the out-of-sample results.
@@ -390,16 +425,16 @@ re-run. Resist the urge to search parameter space until the number looks good.
 ```
 Create branch phase/08-journal-and-alerts.
 
-1. src/journal/ — SQLite store logging every consensus evaluation (including the ones that
+1. fxagent/journal/ — SQLite store logging every consensus evaluation (including the ones that
    produced no signal), the full diagnostics dict, whether a trade was taken, and the outcome
    once closed. Use a migration-friendly schema. Add a repository class, not raw SQL scattered
    through the codebase.
 
-2. A Streamlit dashboard at src/dashboard/app.py showing: current regime and session, each
+2. A Streamlit dashboard at fxagent/dashboard/app.py showing: current regime and session, each
    strategy's latest vote, open positions, current grant state with countdown to expiry,
    equity curve from the journal, and a table of recent signals with outcomes.
 
-3. src/alerts/telegram.py — send a signal card to Telegram with inline Approve/Reject buttons.
+3. fxagent/alerts/telegram.py — send a signal card to Telegram with inline Approve/Reject buttons.
    On approve, place the order through the adapter; on reject, log the rejection with reason.
    Read TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from env. Verify the sender chat ID matches
    the configured one and ignore messages from anyone else.
@@ -421,7 +456,7 @@ logs correctly.
 ```
 Create branch phase/09-llm-synthesis.
 
-Build src/llm/:
+Build fxagent/llm/:
 
 1. gateway.py — a provider-agnostic client. Primary: Google Gemini free tier. Fallback: Groq.
    On rate limit or error, fall through automatically and log which provider served the call.
@@ -454,7 +489,7 @@ None, schema violation returns None, and the fallback provider is used when prim
 ```
 Create branch phase/10-runner.
 
-Build src/main.py — an APScheduler loop that wakes on a schedule keyed to UTC session times,
+Build fxagent/main.py — an APScheduler loop that wakes on a schedule keyed to UTC session times,
 runs one full analysis cycle per configured symbol, writes to the journal, and either sends a
 Telegram card (ADVISORY) or places an order (GRANTED). Add --dry-run to skip all side effects.
 
@@ -470,32 +505,40 @@ anything.
 
 ## Appendix A — .env.example
 
+`.env.example` in the repo root is the source of truth; this is a summary. EXECUTION and DATA
+are separated because they belong to different services — the executor needs the MT5 block and
+nothing else, and the collector needs the DATA block and nothing else.
+
 ```bash
-# --- Broker (Exness demo ONLY) ---
+# ===== EXECUTION — MetaTrader 5 / Exness demo. Execution venue ONLY, not a data source. =====
 MT5_LOGIN=
 MT5_PASSWORD=
 MT5_SERVER=
 MT5_SYMBOLS=EURUSD,GBPUSD,EURGBP
+MT5_SYMBOL_SUFFIX=
+MT5_SERVER_UTC_OFFSET_HOURS=
+MT5_TERMINAL_PATH=
+MT5_DEVIATION_POINTS=20
 
-# --- LLM ---
+# ===== DATA — Forex Factory calendar needs no key, but DOES need a User-Agent (else 429). =====
+CALENDAR_USER_AGENT=fx-regime-agent/0.1
+
+# ===== LLM =====
 GEMINI_API_KEY=
 GROQ_API_KEY=
 LLM_PRIMARY_PROVIDER=gemini
 LLM_FALLBACK_PROVIDER=groq
 
-# --- Data ---
-FINNHUB_API_KEY=
-
-# --- Alerts ---
+# ===== ALERTS =====
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# --- Risk ---
+# ===== RISK =====
 RISK_PER_TRADE=0.005
 MAX_TOTAL_RISK=0.02
 DAILY_LOSS_LIMIT=0.03
 
-# --- Runtime ---
+# ===== RUNTIME =====
 LOG_LEVEL=INFO
 JOURNAL_DB_PATH=./data/journal.db
 TRADING_MODE=advisory

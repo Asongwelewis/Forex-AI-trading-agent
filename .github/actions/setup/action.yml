@@ -1,0 +1,28 @@
+name: Set up the fxagent environment
+description: >
+  Python 3.12 and the locked dependency set, with uv's cache warmed from uv.lock.
+  Both scheduled workflows install identically on purpose: environment drift between
+  them is how a job passes in one workflow and fails in the other for reasons that
+  have nothing to do with the code.
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        # Only re-resolve when the lockfile itself moves. Keyed on anything else, the
+        # cache misses on every run and a "1-2 minute" job becomes a 4 minute one.
+        cache-dependency-glob: uv.lock
+
+    - name: Install the project
+      shell: bash
+      # --frozen installs exactly what uv.lock pins and fails if the lockfile is stale,
+      # rather than quietly resolving something newer. A scheduled job is the worst place
+      # to discover an unreviewed dependency upgrade. --no-dev omits pytest and ruff:
+      # nothing here runs the test suite.
+      #
+      # uv provisions the interpreter itself from .python-version, so there is no
+      # actions/setup-python step to drift out of sync with it.
+      run: uv sync --frozen --no-dev

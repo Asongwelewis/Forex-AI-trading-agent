@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Anything the Linux runners execute must be LF, always, regardless of anyone's local
+# core.autocrlf. A shell script checked out with CRLF fails on bash with `$'\r': command not
+# found` — a message that points at the line after the real problem and takes an hour to
+# recognise. `eol=lf` pins the working-tree ending too, not just what is stored.
+*.sh text eol=lf
+*.sql text eol=lf
+.github/**/*.yml text eol=lf

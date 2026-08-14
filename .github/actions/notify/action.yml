@@ -1,0 +1,61 @@
+name: Telegram notification
+description: >
+  Send one message to the configured Telegram chat. This is the only channel by which a
+  scheduled run can reach a human, so it is deliberately dependency-free: plain curl, no
+  Python, no import of fxagent. A notifier that shares a failure mode with the thing it
+  reports on is not a notifier.
+
+inputs:
+  bot-token:
+    description: TELEGRAM_BOT_TOKEN. Never echoed.
+    required: true
+  chat-id:
+    description: TELEGRAM_CHAT_ID.
+    required: true
+  text:
+    description: Message body, sent as plain text (no Markdown parse mode, so nothing in
+      a log excerpt can be mangled into an unclosed entity and rejected by the API).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send
+      shell: bash
+      env:
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        CHAT_ID: ${{ inputs.chat-id }}
+        TEXT: ${{ inputs.text }}
+      # No `set -x` anywhere in here. The bot token is a path segment of the request URL,
+      # so tracing the curl invocation would print it. Actions masks registered secrets in
+      # log output, but that is the backstop, not the design.
+      run: |
+        set -uo pipefail
+
+        if [ -z "${BOT_TOKEN}" ] || [ -z "${CHAT_ID}" ]; then
+          echo "::error title=Cannot alert::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty, so this run has no way to reach anyone. Set both repository secrets. An unalertable scheduled job is the exact failure this workflow exists to prevent."
+          exit 1
+        fi
+
+        # Telegram caps a message at 4096 characters and rejects longer ones outright,
+        # which would turn a real alert into silence. Truncate rather than lose it.
+        body=$(printf '%s' "${TEXT}" | cut -c1-3900)
+
+        status=$(curl --silent --show-error \
+          --retry 3 --retry-connrefused --retry-delay 5 \
+          --max-time 30 \
+          --output /tmp/telegram-response.json \
+          --write-out '%{http_code}' \
+          --data-urlencode "chat_id=${CHAT_ID}" \
+          --data-urlencode "text=${body}" \
+          --data "disable_web_page_preview=true" \
+          "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage") || status="000"
+
+        if [ "${status}" != "200" ]; then
+          # The response body carries Telegram's own description (bad chat_id, bot blocked,
+          # unauthorized). It does not contain the token, so it is safe to surface.
+          echo "::error title=Telegram send failed::HTTP ${status}: $(cat /tmp/telegram-response.json 2>/dev/null | cut -c1-500)"
+          exit 1
+        fi
+
+        echo "Telegram message delivered (HTTP 200)."
