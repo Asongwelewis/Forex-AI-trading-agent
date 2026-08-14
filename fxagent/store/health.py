@@ -31,6 +31,7 @@ REQUIRED_TABLES = (
     "trades",
     "windows",
     "service_heartbeats",
+    "statistical_observations",
 )
 
 

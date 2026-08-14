@@ -16,10 +16,12 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -172,4 +174,28 @@ service_heartbeats = Table(
     _utc_column("last_beat_utc", nullable=False),
     Column("beats", BigInteger, nullable=False),
     Column("detail", JSONB),
+)
+
+
+#: Raw prints from the primary statistical sources, accumulating so that a surprise history
+#: exists by the time anything wants one. Deliberately NOT `events`: these carry no forecast and
+#: no defensible publication time, so they must stay outside `events_visible_at()` and therefore
+#: outside the analysis pipeline. See migration 0010 for the reasoning.
+statistical_observations = Table(
+    "statistical_observations",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("source", Text, nullable=False),
+    Column("series_id", Text, nullable=False),
+    #: A reference period ('2026-07'), not a publication date.
+    Column("reference_period", Text, nullable=False),
+    Column("period_start", Date, nullable=False),
+    Column("value", Float, nullable=False),
+    #: The original print. Never updated — BLS revises, and the market traded the first number.
+    Column("first_value", Float, nullable=False),
+    _utc_column("first_seen_at", nullable=False),
+    _utc_column("revised_at"),
+    Column("revisions", Integer, nullable=False),
+    UniqueConstraint("source", "series_id", "reference_period", name="statobs_unique"),
+    Index("statobs_series_period_idx", "source", "series_id", "period_start"),
 )
