@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - dependency is declared, so this
 __all__ = [
     "EMBEDDING_DIMENSIONS",
     "bars",
+    "service_heartbeats",
     "evaluations",
     "events",
     "metadata",
@@ -160,4 +161,15 @@ windows = Table(
     _utc_column("outcome_resolved_at"),
     _utc_column("created_at", nullable=False),
     UniqueConstraint("symbol", "timeframe", "ts_utc", name="windows_unique"),
+)
+
+
+service_heartbeats = Table(
+    "service_heartbeats",
+    metadata,
+    Column("service", Text, primary_key=True),
+    _utc_column("started_at_utc", nullable=False),
+    _utc_column("last_beat_utc", nullable=False),
+    Column("beats", BigInteger, nullable=False),
+    Column("detail", JSONB),
 )

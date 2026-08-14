@@ -24,7 +24,14 @@ __all__ = ["HealthReport", "check_health"]
 logger = logging.getLogger(__name__)
 
 #: Tables the schema must expose before any service is allowed to start.
-REQUIRED_TABLES = ("bars", "events", "evaluations", "trades", "windows")
+REQUIRED_TABLES = (
+    "bars",
+    "events",
+    "evaluations",
+    "trades",
+    "windows",
+    "service_heartbeats",
+)
 
 
 @dataclass(frozen=True)

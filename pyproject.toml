@@ -21,12 +21,14 @@ dependencies = [
     # No in-process scheduler. Every entrypoint is short-lived and idempotent, driven by
     # GitHub Actions cron (docs/ADR-002-scheduling.md); apscheduler was the always-on
     # deployment's dependency and nothing imported it.
+
     # Store. SQLAlchemy speaks the Postgres wire protocol, so the same code runs against
     # Supabase and against a bare postgres container in tests. supabase-py would need the
     # whole platform (PostgREST/GoTrue) up to test anything — see docs/ADR-001-store.md.
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",
     "pgvector>=0.3.6",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
