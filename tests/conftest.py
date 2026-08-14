@@ -30,7 +30,17 @@ from fxagent.store.engine import Database
 from fxagent.store.migrate import apply_migrations
 
 #: Emptied between tests. `cascade` handles trades -> evaluations without ordering games.
-_TABLES = ("trades", "evaluations", "events", "bars", "windows", "service_heartbeats")
+#: Emptied between tests. A table missing from here leaks rows into the next test, where it
+#: shows up as a count that is mysteriously too high rather than as an isolation failure.
+_TABLES = (
+    "trades",
+    "evaluations",
+    "events",
+    "bars",
+    "windows",
+    "service_heartbeats",
+    "statistical_observations",
+)
 
 _migrated = False
 

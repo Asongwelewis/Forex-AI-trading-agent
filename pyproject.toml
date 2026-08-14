@@ -67,8 +67,14 @@ testpaths = ["tests"]
 # distribution shipping a top-level `tests` package can shadow ours. Originally added because
 # vibe-trading-ai pulled in `caio`, which does exactly that; kept on its own merits now that
 # hard rule 10 keeps that dependency out of this venv entirely.
-addopts = "-q --import-mode=importlib"
+addopts = "-q --import-mode=importlib -m 'not network'"
 asyncio_mode = "auto"
 # Postgres-backed tests skip themselves when TEST_DATABASE_URL is unset, so the suite stays
 # runnable without Docker. `-m db` runs only those; `-m "not db"` is the no-container subset.
-markers = ["db: requires a live Postgres with pgvector (see docker-compose.test.yml)"]
+markers = [
+    "db: requires a live Postgres with pgvector (see docker-compose.test.yml)",
+    # Deselected by default (see addopts). These hit third-party servers, so they fail on a
+    # plane and they fail when someone else's site is down — neither of which is our defect.
+    # Run them deliberately, with `-m network`, when a feed's shape is in question.
+    "network: reaches a real external feed over the internet",
+]

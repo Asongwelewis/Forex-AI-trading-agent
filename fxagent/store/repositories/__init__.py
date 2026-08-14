@@ -16,6 +16,7 @@ from fxagent.store.repositories.base import Repository, require_utc
 from fxagent.store.repositories.evaluations import EvaluationRecord, EvaluationRepository
 from fxagent.store.repositories.events import HIGH_IMPACT, EventRecord, EventRepository
 from fxagent.store.repositories.heartbeats import HeartbeatRecord, HeartbeatRepository
+from fxagent.store.repositories.observations import ObservationRecord, ObservationRepository
 from fxagent.store.repositories.trades import BARRIERS, MODES, TradeRecord, TradeRepository
 from fxagent.store.repositories.windows import Neighbour, WindowRecord, WindowRepository
 
@@ -31,6 +32,8 @@ __all__ = [
     "HeartbeatRecord",
     "HeartbeatRepository",
     "Neighbour",
+    "ObservationRecord",
+    "ObservationRepository",
     "Repository",
     "TradeRecord",
     "TradeRepository",
