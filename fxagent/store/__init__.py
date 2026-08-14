@@ -25,6 +25,7 @@ from fxagent.store.repositories import (
     BarRepository,
     EvaluationRepository,
     EventRepository,
+    HeartbeatRepository,
     TradeRepository,
     WindowRepository,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "EvaluationRepository",
     "EventRepository",
     "HealthReport",
+    "HeartbeatRepository",
     "Migration",
     "MigrationError",
     "RetryPolicy",
