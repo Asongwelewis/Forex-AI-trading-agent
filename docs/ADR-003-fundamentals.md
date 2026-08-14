@@ -95,6 +95,42 @@ forever.** That is the correct direction to be wrong in. It means a backfill can
 make events visible earlier than we knew them, and it means the calendar's usefulness for
 backtests grows only as the store accumulates its own history.
 
+## Keyless sources that do carry `actual` (surveyed 14 Aug 2026)
+
+The surprise requirement is **not** closed as unavailable, because actuals are keyless and live.
+What is missing is a publication timestamp, which is a different and smaller problem.
+
+| Source | Result | Carries |
+|---|---|---|
+| BLS v1, no key | 200 | `CES0000000001` (nonfarm payrolls), `CUUR0000SA0` (CPI) |
+| BLS v2, no key | 200 | same, `REQUEST_SUCCEEDED` at lower daily limits |
+| Eurostat | 200 | `prc_hicp_manr` — HICP annual rate, the headline euro-area print |
+| CFTC (Socrata) | 200 | COT positioning |
+| ONS `api.ons.gov.uk` | 404 | service appears retired; no keyless UK equivalent found |
+| Trading Economics `guest:guest` | 410 | tier withdrawn |
+
+**None of them publishes a per-release timestamp.** BLS's schedule `.ics` and HTML both answer
+403 to a generic User-Agent, Eurostat's `updated` field is dataset-level and lags the data it
+describes, and the ONS API is gone. An `actual` without a defensible `publication_time_utc` is
+the exact shape of a silent look-ahead bug, so these cannot be ingested as-is.
+
+The way through is that **the calendar already knows when the number goes public.** Join a BLS
+or Eurostat observation to the faireconomy event for the same release and stamp it with that
+event's scheduled `event_time_utc`. That is not an assumption — the figure genuinely becomes
+public at the scheduled moment, which is why the calendar can publish the time days ahead.
+Forecast from the calendar, actual from the primary source, surprise from both.
+
+Four things make this a phase rather than an afternoon:
+
+1. **A hand-maintained series-to-event map.** Perhaps 8–12 entries covering the releases that
+   move FX. This is most of the work, and it needs periodic care as series are renamed.
+2. **Unit reconciliation.** BLS publishes payrolls as a *level* in thousands; the calendar
+   publishes the *change*. The subtraction is trivial; surviving BLS's routine revision of the
+   prior two months at every release is not.
+3. **Eight months of accumulation before the first score.** `surprise_score` needs ≥8 historical
+   samples per release, and these are monthly.
+4. **The hazard below must be fixed first**, or the new actuals arrive already leaking.
+
 ## A hazard for whoever adds a source with results
 
 `upsert_many` updates `actual` on an existing row while leaving `publication_time_utc` at its
