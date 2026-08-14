@@ -16,6 +16,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -44,6 +45,7 @@ except ImportError as exc:  # pragma: no cover - dependency is declared, so this
 __all__ = [
     "EMBEDDING_DIMENSIONS",
     "bars",
+    "cot_reports",
     "service_heartbeats",
     "evaluations",
     "events",
@@ -198,4 +200,35 @@ statistical_observations = Table(
     Column("revisions", Integer, nullable=False),
     UniqueConstraint("source", "series_id", "reference_period", name="statobs_unique"),
     Index("statobs_series_period_idx", "source", "series_id", "period_start"),
+)
+
+
+#: CFTC Commitments of Traders positioning. The one statistical source with a real publication
+#: schedule, so unlike `statistical_observations` it sits behind a point-in-time gate and may be
+#: read by the analysis pipeline — through `cot_visible_at()` and nothing else. See migration
+#: 0011 for why the two timestamps are three days apart and what that costs if they are confused.
+cot_reports = Table(
+    "cot_reports",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("currency", String(3), nullable=False),
+    Column("contract_code", Text, nullable=False),
+    Column("contract_name", Text, nullable=False),
+    #: The Tuesday positions were measured. Never a visibility input.
+    Column("report_date", Date, nullable=False),
+    #: The gate: the following Friday 15:30 US/Eastern, in UTC.
+    _utc_column("published_at", nullable=False),
+    Column("noncommercial_long", BigInteger, nullable=False),
+    Column("noncommercial_short", BigInteger, nullable=False),
+    #: Generated in Postgres so the stored net can never disagree with its own legs.
+    Column(
+        "net_position",
+        BigInteger,
+        Computed("noncommercial_long - noncommercial_short", persisted=True),
+    ),
+    Column("open_interest", BigInteger),
+    _utc_column("fetched_at", nullable=False),
+    UniqueConstraint("contract_code", "report_date", name="cot_reports_unique"),
+    Index("cot_reports_currency_date_idx", "currency", "report_date"),
+    Index("cot_reports_published_idx", "published_at"),
 )

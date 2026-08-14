@@ -17,6 +17,20 @@ Three states, deliberately distinguished — collapsing any two would destroy th
 A trade needs both thresholds: enough summed weight *and* enough separate strategies. Weight
 alone would let one fully-weighted strategy trade by itself, which is the single-signal
 failure mode CLAUDE.md rules out; count alone would ignore the router entirely.
+
+**Positioning is applied after the decision, never to it — and by default not at all.**
+`positioning_score` reaches `evaluate` as an optional argument and touches exactly one number:
+the confidence on a signal that has already qualified. It is not summed into weight, is not
+counted as a vote, and is absent from the threshold comparison entirely — read the code below
+and the two `if` statements that decide whether a trade happens do not mention it. That
+placement is the whole safety argument: crowding is a weekly survey with an indirect
+read-through to spot, so it may grade a decision the deterministic core has made and may not
+make one.
+
+`PositioningConfig` defaults to disabled, so the confidence this class reports is currently
+bit-identical to what it reported before crowding existed. The score is still recorded in the
+diagnostics on both the firing and the rejection path, which is what will make it possible to
+measure the modifier against a clean baseline instead of guessing at it.
 """
 
 from __future__ import annotations
@@ -29,7 +43,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fxagent.adapters.base import UtcDatetime
 from fxagent.regime.classifier import Regime
-from fxagent.strategies.base import Signal, SignalDirection
+from fxagent.strategies.base import (
+    POSITIONING_OFF,
+    PositioningConfig,
+    Signal,
+    SignalDirection,
+    crowding_confidence_factor,
+)
 
 __all__ = [
     "Consensus",
@@ -117,23 +137,39 @@ class ConsensusResult(BaseModel):
 class Consensus:
     """Applies the agreement rules to a slate of votes. Pure; reads no clock and no bars."""
 
-    def __init__(self, config: ConsensusConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ConsensusConfig | None = None,
+        *,
+        positioning: PositioningConfig = POSITIONING_OFF,
+    ) -> None:
         self._config = config or ConsensusConfig()
+        self._positioning = positioning
 
     @property
     def config(self) -> ConsensusConfig:
         return self._config
+
+    @property
+    def positioning(self) -> PositioningConfig:
+        return self._positioning
 
     def evaluate(
         self,
         regime: Regime,
         signals: Mapping[str, Signal | None],
         weights: Mapping[str, float],
+        *,
+        positioning_score: float = 0.0,
     ) -> ConsensusResult:
         """Decide, and explain.
 
         `weights` is the router's full slate and drives the iteration, so a strategy the
         caller forgot to run still appears in the diagnostics as silent rather than vanishing.
+
+        `positioning_score` is CFTC crowding for the pair, base leg minus quote leg, and
+        defaults to 0.0 so a caller with no COT history behaves exactly as before. It modifies
+        the winning signal's confidence and nothing else.
         """
         votes, contributions = self._tally(regime, signals, weights)
         totals = {direction: self._totals(contributions, direction) for direction in _TRADEABLE}
@@ -144,6 +180,8 @@ class Consensus:
         ]
 
         diagnostics = self._diagnostics(regime, votes, totals)
+        diagnostics["positioning_score"] = positioning_score
+        diagnostics["positioning_enabled"] = self._positioning.enabled
 
         if not qualifying:
             diagnostics["reason"] = self._explain_failure(totals)
@@ -161,8 +199,18 @@ class Consensus:
         winners = tuple(c for c in contributions if c.signal.direction is direction)
         total_weight, _ = totals[direction]
 
+        # Everything above this line decided *whether* to trade, without consulting positioning.
+        # Everything below grades the result. Keeping the two apart is what makes the claim in
+        # the module docstring checkable by reading rather than by testing every combination.
+        agreed_confidence = _weighted_confidence(winners)
+        crowding = crowding_confidence_factor(
+            direction, positioning_score, config=self._positioning
+        )
+
         diagnostics["fired"] = True
         diagnostics["winning_direction"] = str(direction)
+        diagnostics["crowding_factor"] = crowding
+        diagnostics["confidence_before_crowding"] = agreed_confidence
         diagnostics["reason"] = (
             f"{len(winners)} strategies agreed on {direction} with summed weight {total_weight:.2f}"
         )
@@ -172,7 +220,7 @@ class Consensus:
                 direction=direction,
                 timestamp=regime.timestamp,
                 total_weight=total_weight,
-                confidence=_weighted_confidence(winners),
+                confidence=agreed_confidence * crowding,
                 contributions=winners,
             ),
             diagnostics=diagnostics,

@@ -1,0 +1,107 @@
+name: COT
+
+# Weekly poll of the CFTC Commitments of Traders report into `cot_reports`. Positioning numbers
+# only; nothing here computes a score or decides anything.
+#
+# **Weekly, not daily.** The COT is published once a week — Friday 15:30 US/Eastern, covering the
+# preceding Tuesday's close. Six of seven daily runs would fetch a byte-identical response, and
+# `fxagent.fundamentals.cot.poll` would correctly refuse most of them anyway via the store's
+# `fetched_at`. Running once, after the release, is the honest schedule rather than a daily job
+# that mostly no-ops.
+#
+# **Saturday, not Friday evening.** The release is 19:30 UTC in summer and 20:30 in winter, and
+# a Friday cron would have to be pinned late enough for the winter case while still sitting on
+# the same day the data lands. Saturday removes the DST arithmetic from the schedule entirely,
+# which is worth more than the twelve hours of freshness it costs on a weekly series.
+#
+# **Holiday weeks lag by up to a week, knowingly.** A US federal holiday pushes the release to
+# the following Monday, which this Saturday run misses. It is picked up by the *next* Saturday,
+# because every fetch pulls ~182 weeks and the upsert is keyed on (contract_code, report_date) —
+# so the history ends up complete, just later. A second weekly run to close that gap would double
+# the requests to fix a handful of weeks a year on a measure that is currently disabled by
+# default; if positioning is ever switched on and the lag matters, add a Tuesday run.
+#
+# **Its own workflow, not a step in collect-and-analyse.** Different cadence — hourly against
+# weekly — and the collector is import-restricted to bar data by
+# `tests/collector/test_collector_is_data_only.py`. `fxagent.fundamentals.cot` transitively
+# imports strategies, so it could not live there even if the cadence matched.
+#
+# **Failure is alerted, not swallowed.** The source fails soft per request, so a run that fetches
+# nothing means the request itself failed or the dataset changed shape. That is the case that
+# must be loud: the percentile ranks against a 156-week window, and a history that quietly
+# stopped growing does not error — it silently ranks against a shorter window and reports
+# confident-looking extremes. `python -m fxagent.fundamentals.cot` exits non-zero on an empty
+# fetch, and exits zero when the daily cache legitimately skips the work.
+
+on:
+  schedule:
+    # 13:19 UTC Saturday. Well clear of the Friday release in either DST regime, and off the top
+    # of the hour for the same queueing reason as the other workflows.
+    - cron: "19 13 * * 6"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Fetch even if the store was refreshed in the last day.
+        type: boolean
+        default: false
+
+concurrency:
+  group: cot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    name: Poll CFTC positioning
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CFTC Socrata endpoint is keyless, so the only required secrets are the store and the
+      # two that let this run tell anyone it failed.
+      - name: Check required secrets
+        env:
+          REQUIRED_SECRETS: SUPABASE_DB_URL TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/check-secrets.sh
+
+      - uses: ./.github/actions/setup
+
+      # Idempotent: the upsert refreshes the position legs and never rewrites `published_at`, so
+      # a re-run stores the same numbers and cannot move a report's visibility. Verified locally
+      # — a second poll of the same 1267 rows changed nothing.
+      - name: Poll CFTC Commitments of Traders
+        run: >
+          uv run python -m fxagent.fundamentals.cot --once
+          ${{ inputs.force && '--force' || '' }}
+
+      - name: Alert on failure
+        if: failure()
+        uses: ./.github/actions/notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          text: |
+            ❌ FX agent COT poll FAILED
+
+            No CFTC positioning was stored this week. If this repeats, the 156-week window
+            stops growing — and a short window does not error, it ranks against fewer points
+            and reports extremes that are not extreme.
+
+            Most likely: the Socrata dataset moved or changed column names, or the store is
+            unreachable.
+
+            Re-run with "force" once the cause is fixed; the daily cache would otherwise skip
+            a same-day retry.
+
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -5,9 +5,22 @@ long earns interest, but carry trades die in drawdowns, not in flat markets — 
 50-period daily EMA must be sloping the same way the carry points, and the injected macro
 bias must not be arguing the opposite. Any of the three disagreeing means no trade.
 
-`rate_differential` and `macro_bias` arrive on `MarketContext` and are never fetched here.
-That is what keeps the strategy replayable: a backtest supplies the differential that was
-true on the bar being replayed, not the one that is true now.
+`rate_differential`, `macro_bias` and `positioning_score` arrive on `MarketContext` and are
+never fetched here. That is what keeps the strategy replayable: a backtest supplies the
+differential that was true on the bar being replayed, not the one that is true now.
+
+**Positioning confirms and never triggers, and right now it does not even confirm.** CFTC
+crowding enters at one place — the confidence the signal reports — after the direction has
+already been decided by carry and confirmed by the EMA. It cannot open a trade the three gates
+rejected, cannot flip a side, and deliberately cannot veto one either. A veto keyed on a
+three-year percentile would stand the strategy down for months at a stretch whenever positioning
+sat in the top decile, on the strength of a weekly survey whose read-through to spot is
+indirect.
+
+It is also **off by default** (`PositioningConfig.enabled`), because there is no baseline to
+measure it against yet. The score still travels on `MarketContext` and is still written to
+`reasoning` on every signal, so the input accumulates in the journal while the confidence this
+strategy reports stays exactly what it was before crowding existed.
 """
 
 from __future__ import annotations
@@ -18,11 +31,14 @@ from typing import TYPE_CHECKING
 from fxagent.adapters.base import BarSeries
 from fxagent.indicators import atr, ema
 from fxagent.strategies.base import (
+    POSITIONING_OFF,
     MarketContext,
+    PositioningConfig,
     Signal,
     SignalDirection,
     Strategy,
     bars_to_frame,
+    crowding_confidence_factor,
 )
 
 if TYPE_CHECKING:
@@ -44,6 +60,9 @@ TIMEFRAME = "D1"
 
 class CarryDivergence(Strategy):
     """Daily carry trade, gated on EMA slope agreement and a non-opposing macro bias."""
+
+    def __init__(self, *, positioning: PositioningConfig = POSITIONING_OFF) -> None:
+        self._positioning = positioning
 
     @property
     def name(self) -> str:
@@ -98,10 +117,19 @@ class CarryDivergence(Strategy):
         else:
             stop, target = entry + risk, entry - REWARD_RISK * risk
 
+        # Conviction from the macro brief, then discounted by how crowded the trade already is.
+        # The order matters only for readability — the factor is bounded below by
+        # `1 - MAX_CROWDING_PENALTY`, so it can never reach zero and turn confirmation into a
+        # gate by arithmetic.
+        conviction = min(1.0, 0.5 + 0.5 * abs(context.macro_bias))
+        crowding = crowding_confidence_factor(
+            direction, context.positioning_score, config=self._positioning
+        )
+
         return Signal(
             symbol=bars.symbol,
             direction=direction,
-            confidence=min(1.0, 0.5 + 0.5 * abs(context.macro_bias)),
+            confidence=conviction * crowding,
             entry_price=entry,
             stop_loss=stop,
             take_profit=target,
@@ -110,6 +138,13 @@ class CarryDivergence(Strategy):
             reasoning={
                 "rate_differential": context.rate_differential,
                 "macro_bias": context.macro_bias,
+                # Recorded whether or not the flag is on. With it off, `crowding_factor` is 1.0
+                # and `positioning_score` is the untouched input — which is exactly the pair of
+                # columns needed to compute the delta later without re-running the backtest.
+                "positioning_score": context.positioning_score,
+                "positioning_enabled": self._positioning.enabled,
+                "crowding_factor": crowding,
+                "confidence_before_crowding": conviction,
                 "ema_slope": float(slope),
                 "ema": float(trend.iloc[-1]),
                 "atr": float(average_range),

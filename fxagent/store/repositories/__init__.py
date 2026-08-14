@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from fxagent.store.repositories.bars import BarRepository
 from fxagent.store.repositories.base import Repository, require_utc
+from fxagent.store.repositories.cot import CotReportRecord, CotRepository
 from fxagent.store.repositories.evaluations import EvaluationRecord, EvaluationRepository
 from fxagent.store.repositories.events import HIGH_IMPACT, EventRecord, EventRepository
 from fxagent.store.repositories.heartbeats import HeartbeatRecord, HeartbeatRepository
@@ -25,6 +26,8 @@ __all__ = [
     "HIGH_IMPACT",
     "MODES",
     "BarRepository",
+    "CotReportRecord",
+    "CotRepository",
     "EvaluationRecord",
     "EvaluationRepository",
     "EventRecord",

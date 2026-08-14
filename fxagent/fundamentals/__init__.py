@@ -34,6 +34,15 @@ from fxagent.fundamentals.context import (
     split_symbol,
 )
 
+# `cot` is deliberately NOT re-exported here, and it is the only source that is not.
+#
+# It reaches back into `context` for `split_symbol`, so importing it from this file would work
+# only while it stayed the last line — an ordering constraint that holds until someone sorts the
+# imports. Leaving it out makes the dependency one-directional by construction instead of by
+# convention, and it also keeps `python -m fxagent.fundamentals.cot` from importing the module
+# twice (once through this file, once as `__main__`), which runpy warns about on every scheduled
+# run. Import it directly: `from fxagent.fundamentals.cot import CotHistory`.
+
 __all__ = [
     "CALENDAR_URL",
     "DEFAULT_FEEDS",

@@ -13,6 +13,12 @@ strategy reads the sign of this value to pick long or short. Rates move on a sch
 package has no feed for, so they are injected by the caller and a missing one yields None
 rather than a default. `MarketContext.neutral()` is the honest fallback: a carry strategy with
 no carry number should stand down, not guess zero and then trade the macro tiebreak.
+
+**COT positioning is read through `CotRepository`, which gates on `published_at` in SQL** for
+the same reason events are gated on publication time — a COT row references the preceding
+Tuesday and is public on Friday, so a read keyed on the reference date back-dates it by three
+days. `cot.py` imports `split_symbol` from here, so the import back the other way is
+type-checking only; the runtime dependency runs one way and there is no cycle.
 """
 
 from __future__ import annotations
@@ -21,9 +27,17 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
+from fxagent.store.repositories.cot import CotRepository
 from fxagent.store.repositories.events import HIGH_IMPACT, EventRecord, EventRepository
 from fxagent.strategies.base import MarketContext
+
+if TYPE_CHECKING:
+    # Type-checking only, and necessarily so: `fundamentals.cot` imports `split_symbol` from
+    # this module, so a runtime import here would close the loop. Nothing below needs the class
+    # itself, only attributes off an instance built by `_positioning`.
+    from fxagent.fundamentals.cot import PairPositioning
 
 __all__ = [
     "FundamentalContext",
@@ -130,6 +144,9 @@ class FundamentalContext:
     rate_differential: float | None
     imminent_high_impact: tuple[EventRecord, ...] = ()
     recent_events: tuple[EventRecord, ...] = ()
+    #: None when no COT repository was supplied or the read failed. Distinct from a positioning
+    #: object whose score happens to be 0.0, which means "measured, and mid-range".
+    positioning: PairPositioning | None = None
     unavailable: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -148,6 +165,27 @@ class FundamentalContext:
         return bool(self.unavailable)
 
 
+async def _positioning(
+    cot_repository: CotRepository,
+    *,
+    as_of: datetime,
+    symbol: str,
+) -> PairPositioning:
+    """Rank both legs of `symbol` against what the CFTC had released at `as_of`.
+
+    Imported inside the function on purpose: `fundamentals.cot` imports `split_symbol` from this
+    module, so a module-level import would be a cycle. Confined to the one call site that needs
+    it rather than papered over by reshuffling the packages, because `split_symbol` genuinely
+    belongs next to `rate_differential` and `CotHistory` genuinely belongs next to the fetcher.
+    """
+    from fxagent.fundamentals.cot import CONTRACT_CODES, CotHistory
+
+    base, quote = split_symbol(symbol)
+    wanted = [leg for leg in (base, quote) if leg in CONTRACT_CODES]
+    records = await cot_repository.visible_at(as_of, currencies=wanted) if wanted else []
+    return CotHistory(records).pair_positioning_score(symbol)
+
+
 async def build_context(
     repository: EventRepository,
     *,
@@ -155,6 +193,7 @@ async def build_context(
     symbol: str,
     rates: Mapping[str, PolicyRate],
     macro_bias: float = 0.0,
+    cot_repository: CotRepository | None = None,
     lookahead: timedelta = DEFAULT_LOOKAHEAD,
     lookbehind: timedelta = DEFAULT_LOOKBEHIND,
     recent_window: timedelta = timedelta(hours=24),
@@ -166,6 +205,11 @@ async def build_context(
     signed conviction is interpretation, which belongs to the historian agent — and hard rule 4
     keeps that path advisory. Left at 0.0, `carry_divergence` trades on carry and price alone,
     which is the correct behaviour when no agent has spoken.
+
+    `cot_repository` is optional and omitting it yields neutral positioning, which is the same
+    behaviour as before this input existed. It is a separate argument rather than a second
+    method on `EventRepository` because the two tables have separate gate functions, and one
+    repository spanning both would be one `as_of` covering two visibility rules.
     """
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware; a naive value shifts the visibility gate")
@@ -200,10 +244,22 @@ async def build_context(
         recent = []
         unavailable.append("recent_events")
 
-    market = (
-        MarketContext(rate_differential=differential, macro_bias=macro_bias)
-        if differential is not None
-        else MarketContext(rate_differential=0.0, macro_bias=macro_bias)
+    positioning: PairPositioning | None = None
+    if cot_repository is not None:
+        try:
+            positioning = await _positioning(cot_repository, as_of=checked, symbol=symbol)
+        except Exception as exc:  # noqa: BLE001 - positioning is context, never a precondition
+            logger.warning("could not read COT positioning: %s: %s", type(exc).__name__, exc)
+            unavailable.append("positioning")
+        else:
+            # A leg with too little history is degraded, not broken. Recorded so the dashboard
+            # can say "EUR ranked, NZD not yet" instead of showing a confident-looking zero.
+            unavailable.extend(f"positioning:{leg}" for leg in positioning.unavailable)
+
+    market = MarketContext(
+        rate_differential=differential if differential is not None else 0.0,
+        macro_bias=macro_bias,
+        positioning_score=positioning.score if positioning is not None else 0.0,
     )
 
     return FundamentalContext(
@@ -213,6 +269,7 @@ async def build_context(
         rate_differential=differential,
         imminent_high_impact=tuple(imminent),
         recent_events=tuple(recent),
+        positioning=positioning,
         unavailable=tuple(unavailable),
     )
 
