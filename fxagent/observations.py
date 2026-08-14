@@ -32,7 +32,10 @@ Sitting at the top level, this module imports httpx and the standard library and
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import logging
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -338,3 +341,96 @@ class EurostatSource:
                 )
             )
         return observations
+
+
+# -- entry point -------------------------------------------------------------------------------
+#
+# `python -m fxagent.observations --once`, called daily by
+# .github/workflows/observations.yml. Its own workflow rather than a step in the collector:
+# the collector's value is being the dumbest process in the system, and this is not bar data.
+#
+# The store imports live down here rather than at module scope so the source clients stay
+# importable on their own — the isolation this module exists to preserve is checked by
+# tests/store/test_observations_are_not_in_the_pipeline.py.
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m fxagent.observations",
+        description="Poll BLS and Eurostat for raw statistical prints. Computes nothing.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Poll once and exit. The only supported mode; accepted for symmetry with the "
+        "collector, whose workflow invokes it the same way.",
+    )
+    parser.add_argument("--log-level", default="INFO")
+    return parser.parse_args(argv)
+
+
+async def _run() -> int:
+    from fxagent.store import Database, apply_migrations
+    from fxagent.store.repositories import ObservationRepository
+
+    database = Database.from_env()
+    try:
+        async with database.connect() as connection:
+            applied = await apply_migrations(connection)
+        if applied:
+            logger.info("applied %d migration(s)", len(applied))
+
+        collected: list[Observation] = []
+        async with BlsSource() as bls:
+            collected.extend(await bls.fetch())
+        async with EurostatSource() as eurostat:
+            collected.extend(await eurostat.fetch())
+
+        if not collected:
+            # Both sources fail soft per series, so reaching zero means every one of them
+            # failed. That must be loud: this job exists to keep a clock running, and a clock
+            # that stopped silently is discovered eight months later when the surprise history
+            # everyone assumed was accumulating turns out to be empty.
+            logger.error("no observations from any source — the accumulation clock is not running")
+            return 1
+
+        async with database.session() as session:
+            written = await ObservationRepository(session).upsert_many(
+                observation.as_row() for observation in collected
+            )
+            await session.commit()
+
+        by_source: dict[str, int] = {}
+        for observation in collected:
+            by_source[observation.source] = by_source.get(observation.source, 0) + 1
+        logger.info(
+            "stored %d row(s) from %d observation(s): %s",
+            written,
+            len(collected),
+            ", ".join(f"{name}={count}" for name, count in sorted(by_source.items())),
+        )
+        return 0
+    finally:
+        await database.dispose()
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    try:
+        return asyncio.run(_run())
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:  # noqa: BLE001 - the top-level boundary; the alert needs a message
+        logger.error("observations run failed: %s: %s", type(exc).__name__, exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

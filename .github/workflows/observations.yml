@@ -1,0 +1,84 @@
+name: Observations
+
+# Daily poll of the primary statistical offices — BLS and Eurostat — into
+# `statistical_observations`. Raw prints only; nothing here computes or decides.
+#
+# **Daily, not hourly.** BLS v1 is keyless and capped at 25 queries per day per IP. These series
+# publish monthly, so hourly polling would spend the entire quota re-fetching numbers that had
+# not changed, and then fail for the rest of the day at the moment one actually did.
+#
+# **Its own workflow, not a step in collect-and-analyse.** The collector's entire justification
+# is being the dumbest process in the system: it fetches bars and nothing else, and
+# `tests/collector/test_collector_is_data_only.py` enforces that by inspecting its imports.
+# Statistical prints are not bar data, and the convenience of one fewer workflow file is worth
+# less than that boundary. Different cadence, too — hourly against daily.
+#
+# **Not health.yml either.** That workflow deliberately imports no fxagent code so it cannot
+# share a failure mode with the pipeline it reports on. This one has to import fxagent.
+#
+# **Failure is alerted, not swallowed.** The sources already fail soft per series, so a run that
+# collects nothing at all means every source failed. That is precisely the case that must be
+# loud: this job exists to keep an accumulation clock running, and a clock that stopped quietly
+# is discovered months later when the history everyone assumed was building turns out to be
+# empty. `python -m fxagent.observations` exits non-zero on an empty collection for that reason.
+
+on:
+  schedule:
+    # 19:41 UTC. After the US morning releases (08:30 ET) have landed in the BLS API, and off
+    # the top of the hour for the same queueing reason as the other workflows.
+    - cron: "41 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: observations
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    name: Poll statistical offices
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # BLS and Eurostat are keyless, so the only required secrets are the store and the two
+      # that let this run tell anyone it failed.
+      - name: Check required secrets
+        env:
+          REQUIRED_SECRETS: SUPABASE_DB_URL TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/check-secrets.sh
+
+      - uses: ./.github/actions/setup
+
+      # Idempotent by construction: the upsert updates `value` and leaves `first_value` alone,
+      # so a re-run stores the same numbers and records no revision. Verified locally — two
+      # consecutive runs left 97 rows with 0 revisions.
+      - name: Poll BLS and Eurostat
+        run: uv run python -m fxagent.observations --once
+
+      - name: Alert on failure
+        if: failure()
+        uses: ./.github/actions/notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          text: |
+            ❌ FX agent observations poll FAILED
+
+            No statistical prints were stored today. If this repeats, the surprise history
+            stops accumulating and stays empty until someone notices.
+
+            Most likely: the BLS v1 daily quota (25/IP) is spent, or a source changed shape.
+
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
