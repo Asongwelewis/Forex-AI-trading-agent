@@ -5,9 +5,17 @@ long earns interest, but carry trades die in drawdowns, not in flat markets — 
 50-period daily EMA must be sloping the same way the carry points, and the injected macro
 bias must not be arguing the opposite. Any of the three disagreeing means no trade.
 
-`rate_differential` and `macro_bias` arrive on `MarketContext` and are never fetched here.
-That is what keeps the strategy replayable: a backtest supplies the differential that was
-true on the bar being replayed, not the one that is true now.
+`rate_differential`, `macro_bias` and `positioning_score` arrive on `MarketContext` and are
+never fetched here. That is what keeps the strategy replayable: a backtest supplies the
+differential that was true on the bar being replayed, not the one that is true now.
+
+**Positioning confirms and never triggers.** CFTC crowding enters at one place — the confidence
+the signal reports — and enters after the direction has already been decided by carry and
+confirmed by the EMA. It cannot open a trade the three gates rejected, cannot flip a side, and
+deliberately cannot veto one either. A veto keyed on a three-year percentile would stand the
+strategy down for months at a stretch whenever positioning sat in the top decile, on the
+strength of a weekly survey of futures traders whose read-through to spot is indirect. Grading
+confidence is what the evidence supports; gating is not.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from fxagent.strategies.base import (
     SignalDirection,
     Strategy,
     bars_to_frame,
+    crowding_confidence_factor,
 )
 
 if TYPE_CHECKING:
@@ -98,10 +107,17 @@ class CarryDivergence(Strategy):
         else:
             stop, target = entry + risk, entry - REWARD_RISK * risk
 
+        # Conviction from the macro brief, then discounted by how crowded the trade already is.
+        # The order matters only for readability — the factor is bounded below by
+        # `1 - MAX_CROWDING_PENALTY`, so it can never reach zero and turn confirmation into a
+        # gate by arithmetic.
+        conviction = min(1.0, 0.5 + 0.5 * abs(context.macro_bias))
+        crowding = crowding_confidence_factor(direction, context.positioning_score)
+
         return Signal(
             symbol=bars.symbol,
             direction=direction,
-            confidence=min(1.0, 0.5 + 0.5 * abs(context.macro_bias)),
+            confidence=conviction * crowding,
             entry_price=entry,
             stop_loss=stop,
             take_profit=target,
@@ -110,6 +126,9 @@ class CarryDivergence(Strategy):
             reasoning={
                 "rate_differential": context.rate_differential,
                 "macro_bias": context.macro_bias,
+                "positioning_score": context.positioning_score,
+                "crowding_factor": crowding,
+                "confidence_before_crowding": conviction,
                 "ema_slope": float(slope),
                 "ema": float(trend.iloc[-1]),
                 "atr": float(average_range),

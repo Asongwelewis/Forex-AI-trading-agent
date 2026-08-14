@@ -40,6 +40,7 @@ _TABLES = (
     "windows",
     "service_heartbeats",
     "statistical_observations",
+    "cot_reports",
 )
 
 _migrated = False

@@ -34,21 +34,42 @@ from fxagent.fundamentals.context import (
     split_symbol,
 )
 
+# Imported last: `cot` reaches back into `context` for `split_symbol`, so `context` must be
+# fully initialised before this line runs.
+from fxagent.fundamentals.cot import (  # noqa: E402 - see the comment above
+    CONTRACT_CODES,
+    COT_DATASET_URL,
+    CftcCotSource,
+    CotHistory,
+    CotReport,
+    PairPositioning,
+    percentile_rank,
+    publication_time,
+)
+
 __all__ = [
     "CALENDAR_URL",
+    "CONTRACT_CODES",
+    "COT_DATASET_URL",
     "DEFAULT_FEEDS",
     "IMPORTANCE_VALUES",
     "CentralBankFeed",
     "CentralBankRss",
+    "CftcCotSource",
+    "CotHistory",
+    "CotReport",
     "Event",
     "ForexFactoryCalendar",
     "FundamentalContext",
     "FundamentalSource",
+    "PairPositioning",
     "PolicyRate",
     "build_context",
     "fetch_all",
     "fetch_safely",
     "parse_value",
+    "percentile_rank",
+    "publication_time",
     "rate_differential",
     "split_symbol",
     "surprise_score",

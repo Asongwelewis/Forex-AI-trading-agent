@@ -114,6 +114,23 @@ What is missing is a publication timestamp, which is a different and smaller pro
 describes, and the ONS API is gone. An `actual` without a defensible `publication_time_utc` is
 the exact shape of a silent look-ahead bug, so these cannot be ingested as-is.
 
+**Amended 14 Aug 2026 — the CFTC is the exception, and it is now treated as one.** The sentence
+above is about a *timestamp field*, and the COT still has none. But it does not need one: the
+report is released on a fixed statutory-practice schedule, Friday 15:30 US/Eastern covering the
+preceding Tuesday's close, so publication time is *derivable from a published rule* rather than
+guessed. That is a different epistemic position from BLS and Eurostat, where nothing is known
+about when a given print appeared, and it is enough to gate on. So COT lives in `cot_reports`
+with its own `cot_visible_at()` function (migration 0011) and *is* readable by the analysis
+pipeline, while BLS and Eurostat prints stay in `statistical_observations`, outside every gate,
+exactly as migration 0010 describes. The residual imprecision — holiday weeks slip the release
+to Monday, and there is no field to detect that from — is documented at
+`fxagent.fundamentals.cot.publication_time` rather than left implicit.
+
+Also corrected while verifying: the Traders in Financial Futures report has no non-commercial
+columns at all. TFF (`resource/gpe5-46if.json`) partitions reportable traders into dealer,
+asset manager, leveraged money and other reportable. Non-commercial long/short is **Legacy**
+vocabulary, and lives at `resource/6dca-aqww.json`.
+
 The way through is that **the calendar already knows when the number goes public.** Join a BLS
 or Eurostat observation to the faireconomy event for the same release and stamp it with that
 event's scheduled `event_time_utc`. That is not an assumption — the figure genuinely becomes

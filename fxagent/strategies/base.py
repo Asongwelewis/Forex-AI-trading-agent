@@ -36,11 +36,13 @@ if TYPE_CHECKING:
     from fxagent.regime.classifier import Regime
 
 __all__ = [
+    "MAX_CROWDING_PENALTY",
     "MarketContext",
     "Signal",
     "SignalDirection",
     "Strategy",
     "bars_to_frame",
+    "crowding_confidence_factor",
     "order_side_for",
 ]
 
@@ -97,11 +99,63 @@ class MarketContext(BaseModel):
         description="Signed macro conviction: +1 fully bullish the base currency, "
         "-1 fully bearish, 0 neutral or unknown.",
     )
+    positioning_score: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        description="CFTC non-commercial crowding for the pair, base leg minus quote leg. "
+        "+1 means speculative longs sit at a three-year extreme. A measure of how much "
+        "fuel is left, not a direction — see fxagent.fundamentals.cot.",
+    )
 
     @classmethod
     def neutral(cls) -> MarketContext:
-        """No carry, no view — the honest default when upstream data is unavailable."""
-        return cls(rate_differential=0.0, macro_bias=0.0)
+        """No carry, no view, no positioning — the honest default when upstream is unavailable.
+
+        Note that neutral positioning and mid-range positioning are the same number here, and
+        deliberately so: both mean "crowding is not an argument against this trade", which is
+        the only thing any consumer of this field is allowed to do with it.
+        """
+        return cls(rate_differential=0.0, macro_bias=0.0, positioning_score=0.0)
+
+
+#: The most confidence crowding may remove. A quarter is enough to reorder two otherwise
+#: comparable setups and far too little to stand in for a gate, which is the point: positioning
+#: is confirmation, and a number that could suppress a trade on its own would be a trigger with
+#: the sign flipped.
+MAX_CROWDING_PENALTY = 0.25
+
+
+def crowding_confidence_factor(
+    direction: SignalDirection,
+    positioning_score: float,
+    *,
+    max_penalty: float = MAX_CROWDING_PENALTY,
+) -> float:
+    """How much of a signal's confidence survives the crowd, in [1 - max_penalty, 1].
+
+    Crowding is only ever an argument *against*. Buying what everyone already owns leaves fewer
+    marginal buyers and a thinner exit, so a LONG into a +0.9 percentile is worth less than the
+    same LONG into a neutral one. The reverse is not true in the same way — an uncrowded trade
+    is normal, not an edge — so this scales down and never up, which is the same asymmetry hard
+    rule 9 imposes on position sizing and for the same reason: a multiplier that can exceed 1.0
+    is a multiplier that eventually gets pointed at size.
+
+    FLAT has no exposure to be crowded into and is returned unmodified.
+    """
+    if not -1.0 <= positioning_score <= 1.0:
+        raise ValueError(f"positioning_score must be in [-1, 1], got {positioning_score}")
+    if not 0.0 <= max_penalty < 1.0:
+        raise ValueError(f"max_penalty must be in [0, 1), got {max_penalty}")
+
+    if direction is SignalDirection.LONG:
+        crowding = max(0.0, positioning_score)
+    elif direction is SignalDirection.SHORT:
+        crowding = max(0.0, -positioning_score)
+    else:
+        return 1.0
+
+    return 1.0 - max_penalty * crowding
 
 
 class Signal(BaseModel):

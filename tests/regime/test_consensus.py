@@ -221,6 +221,77 @@ class TestDiagnosticsAlwaysPopulated:
         assert result.diagnostics["is_trending"] is True
 
 
+class TestPositioning:
+    """Crowding may grade a decision and may not make one.
+
+    Every test here holds the slate fixed and varies only `positioning_score`, so any change in
+    whether a trade happens is attributable to positioning alone — which is exactly the change
+    that must never appear.
+    """
+
+    #: Two agreeing strategies clearing both thresholds. Fires with no positioning input at all.
+    AGREED = {
+        SESSION_BREAKOUT: signal(SESSION_BREAKOUT, LONG, timestamp=MOMENT, confidence=0.8),
+        CARRY_DIVERGENCE: signal(CARRY_DIVERGENCE, LONG, timestamp=MOMENT, confidence=0.8),
+    }
+    #: One strategy short of the count threshold. Rejected with no positioning input at all.
+    LONE = {SESSION_BREAKOUT: signal(SESSION_BREAKOUT, LONG, timestamp=MOMENT, confidence=0.8)}
+
+    def test_omitting_positioning_behaves_exactly_as_before(self) -> None:
+        """The default must be inert, or every existing caller silently changes behaviour."""
+        without = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        neutral = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=0.0)
+
+        assert without.signal is not None and neutral.signal is not None
+        assert without.signal.confidence == pytest.approx(neutral.signal.confidence)
+
+    def test_crowding_discounts_the_agreed_confidence(self) -> None:
+        plain = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        crowded = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0)
+
+        assert plain.signal is not None and crowded.signal is not None
+        assert crowded.signal.confidence < plain.signal.confidence
+
+    def test_positioning_never_turns_a_rejection_into_a_trade(self) -> None:
+        """The failure that would matter. A single strategy must stay a single strategy."""
+        for score in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            result = Consensus().evaluate(_regime(), self.LONE, OPEN_SLATE, positioning_score=score)
+            assert result.fired is False, f"positioning {score} manufactured a trade"
+
+    def test_positioning_never_turns_a_trade_into_a_rejection(self) -> None:
+        """The mirror. A veto keyed on crowding would be a trigger with the sign flipped."""
+        for score in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            result = Consensus().evaluate(
+                _regime(), self.AGREED, OPEN_SLATE, positioning_score=score
+            )
+            assert result.fired is True, f"positioning {score} suppressed a trade"
+
+    def test_positioning_does_not_touch_weight_or_the_vote_count(self) -> None:
+        plain = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE)
+        crowded = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=1.0)
+
+        assert plain.signal is not None and crowded.signal is not None
+        assert crowded.signal.total_weight == pytest.approx(plain.signal.total_weight)
+        assert crowded.diagnostics["long_weight"] == plain.diagnostics["long_weight"]
+        assert crowded.diagnostics["long_votes"] == plain.diagnostics["long_votes"]
+
+    def test_the_discount_is_recorded_in_the_diagnostics(self) -> None:
+        result = Consensus().evaluate(_regime(), self.AGREED, OPEN_SLATE, positioning_score=0.8)
+
+        assert result.signal is not None
+        assert result.diagnostics["positioning_score"] == pytest.approx(0.8)
+        assert result.signal.confidence == pytest.approx(
+            result.diagnostics["confidence_before_crowding"] * result.diagnostics["crowding_factor"]
+        )
+
+    def test_positioning_is_recorded_on_the_rejection_path_too(self) -> None:
+        """The rejections are the product; a rejection that drops an input cannot be replayed."""
+        result = Consensus().evaluate(_regime(), self.LONE, OPEN_SLATE, positioning_score=-0.6)
+
+        assert result.fired is False
+        assert result.diagnostics["positioning_score"] == pytest.approx(-0.6)
+
+
 class TestWiringErrors:
     def test_a_signal_for_the_wrong_symbol_is_an_error_not_a_disagreement(self) -> None:
         with pytest.raises(ValueError, match="wiring error"):
