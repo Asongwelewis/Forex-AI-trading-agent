@@ -46,6 +46,11 @@ docker compose -f docker-compose.dashboard.yml up -d --build
 It needs `SUPABASE_DB_URL` and nothing else. `FX_DASHBOARD_PORT` (8080) and
 `FX_DASHBOARD_REFRESH_SECONDS` (15) are the only other knobs.
 
+The price series draws as **candles, bars, line, area or baseline** — all views of the same
+payload, switched client-side. The left drawer and the legend both toggle individual overlays,
+the session shading, the markers and the trade levels; the right drawer is the agent panel and
+collapses to give the chart the full width. Every choice persists in `localStorage`.
+
 | Route | |
 |---|---|
 | `/` | the panel |

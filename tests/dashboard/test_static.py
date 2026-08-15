@@ -56,3 +56,30 @@ def test_the_front_end_renders_stored_text_as_text() -> None:
 
     assert "innerHTML" not in body
     assert "textContent" in body
+
+
+def test_the_session_colours_agree_between_the_stylesheet_and_the_painter() -> None:
+    """The bands are painted onto a canvas, which cannot read a CSS custom property, so the
+    four colours exist in both files. That is a real duplication and this is what keeps it
+    honest — a legend swatch that disagrees with the band it labels is a chart that lies."""
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    for token, key in (
+        ("--tokyo", "TOKYO"),
+        ("--london", "LONDON"),
+        ("--newyork", "NEW_YORK"),
+        ("--overlap", "OVERLAP"),
+    ):
+        in_css = re.search(rf"{token}:\s*(rgba\([^)]*\))", css)
+        in_js = re.search(rf'{key}:\s*"(rgba\([^)]*\))"', js)
+
+        assert in_css and in_js, f"{key} is missing from one of the two files"
+        assert _colour(in_css.group(1)) == _colour(in_js.group(1)), (
+            f"{key} differs: {in_css.group(1)} in CSS, {in_js.group(1)} in JS"
+        )
+
+
+def _colour(value: str) -> tuple[float, ...]:
+    """rgba(...) as numbers, so `0.1` and `0.10` compare equal."""
+    return tuple(float(part) for part in value[value.index("(") + 1 : -1].split(","))

@@ -1,31 +1,84 @@
 /*
-  Readable rather than pretty. Dark because the chart is, monospace because almost everything
-  on this page is a number that should line up with the number under it.
+  Obsidian — the panel's theme.
+  =============================
 
-  Colours are stated once here and once in `chart.py` — the Python side owns the series and
-  marker colours because it owns the series, and this file owns the chrome. Where the two must
-  agree (the strategy colours in the legend) the value comes down in the payload rather than
-  being restated in CSS.
+  Graphite glass over near-black, with champagne as the only highlight. The chrome is
+  deliberately **desaturated**: on this screen the candles, the strategy markers and the
+  session bands are the only saturated things, so hue means data and nothing else. A brand
+  colour with an opinion would have to sit next to amber `session_breakout`, teal
+  `range_reversion` and violet `carry_divergence` markers, and every one of those would get
+  harder to read to buy a logo a personality it does not need.
+
+  Champagne (#e9d8b4) is near-neutral, so it reads as *light on metal* rather than as another
+  hue competing for meaning. Selection glows, it does not recolour.
+
+  Everything else follows from three rules:
+
+  * **Depth is light, not shadow.** Panels are translucent with a 1px hairline and an inset top
+    highlight, the way a bezel catches a room. Drop shadows are for lift, never for separation.
+  * **Motion is 160-280ms, transform and opacity only.** Enter eases out, exit eases in at ~65%
+    of the duration, so dismissing always feels quicker than opening. Everything respects
+    `prefers-reduced-motion`.
+  * **Numbers are tabular.** A data panel whose digits change width jitters on every tick.
+
+  Type is the system stack. No webfont: the page must render with no network, and a FOIT on a
+  monitoring screen is worse than a familiar UI face.
 */
 
 :root {
-  --bg: #14161a;
-  --panel: #1a1d23;
-  --panel-2: #20242b;
-  --line: #2b3038;
-  --text: #d8dce3;
-  --muted: #8a909b;
-  --dim: #666c77;
-  --long: #26a69a;
-  --short: #ef5350;
-  --warn: #e0a03c;
-  --ok: #4c9f70;
-  --bad: #d1544f;
+  color-scheme: dark;
 
-  --tokyo: rgba(120, 160, 220, 0.10);
-  --london: rgba(230, 170, 80, 0.10);
-  --newyork: rgba(150, 120, 210, 0.10);
-  --overlap: rgba(230, 120, 120, 0.10);
+  /* --- surface ------------------------------------------------------------ */
+  --bg: #07090c;
+  --bg-raise: #0c0f14;
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-strong: rgba(255, 255, 255, 0.075);
+  --hairline: rgba(255, 255, 255, 0.085);
+  --hairline-lit: rgba(255, 255, 255, 0.16);
+  --scrim: rgba(4, 6, 9, 0.62);
+
+  /* --- ink ---------------------------------------------------------------- */
+  --text: #e8ebf1;
+  --text-2: #9aa3b3;
+  --text-3: #6a7383;
+
+  /* --- highlight ---------------------------------------------------------- */
+  --champagne: #e9d8b4;
+  --champagne-soft: rgba(233, 216, 180, 0.14);
+  --champagne-edge: rgba(233, 216, 180, 0.42);
+
+  /* --- data (must not be reused for chrome) -------------------------------- */
+  --long: #31c9a4;
+  --short: #f2555a;
+  --warn: #e0a03c;
+  --danger: #ff6b66;
+  --ok: #46b98a;
+
+  /* --- session bands, mirrored in app.js SESSION_FILL ----------------------
+     Deliberately faint. Shading answers "which session is this bar in" at a glance and then
+     gets out of the way; at 0.10 it read as a barcode drawn over the candles rather than as
+     the ground they sit on. The overlap is the one that earns extra weight, because the
+     busiest hours of the day are the thing worth spotting without looking. */
+  --tokyo: rgba(120, 160, 220, 0.06);
+  --london: rgba(230, 170, 80, 0.06);
+  --newyork: rgba(150, 120, 210, 0.06);
+  --overlap: rgba(230, 120, 120, 0.085);
+
+  /* --- rhythm -------------------------------------------------------------- */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --drawer-w: 420px;
+  --options-w: 260px;
+
+  /* --- motion -------------------------------------------------------------- */
+  --enter: 240ms;
+  --exit: 160ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 }
 
 * {
@@ -41,108 +94,387 @@ body {
 body {
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.45 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font: 400 13px/1.5 var(--font);
+  font-variant-numeric: tabular-nums;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-/* --- header ------------------------------------------------------------- */
+/* Two very wide, very faint pools of light. They give the glass something to refract, which
+   is the whole reason a translucent panel reads as a panel and not as a flat grey rectangle. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 34rem at 12% -8%, rgba(233, 216, 180, 0.055), transparent 62%),
+    radial-gradient(52rem 30rem at 96% 108%, rgba(120, 150, 210, 0.05), transparent 60%);
+  z-index: 0;
+}
 
-.bar {
+.sprite {
+  display: none;
+}
+
+.icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon .fill {
+  fill: currentColor;
+  fill-opacity: 0.16;
+  stroke: none;
+}
+.icon .dashed {
+  stroke-dasharray: 3 3;
+  opacity: 0.5;
+}
+
+/* --- glass ---------------------------------------------------------------- */
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--hairline);
+  /* The inset highlight is what makes it read as a bevelled surface rather than a tinted box. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 30px -18px rgba(0, 0, 0, 0.9);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+}
+
+/* --- top bar --------------------------------------------------------------- */
+
+.topbar {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 8px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  flex: 0 0 auto;
+  gap: 10px;
+  padding: 10px 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+  border-bottom: 1px solid var(--hairline);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
 }
 
-.title {
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.control {
-  display: inline-flex;
+.brand {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  color: var(--muted);
+  gap: 10px;
+  padding-right: 4px;
 }
 
-select {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--line);
+.brand__mark {
+  width: 10px;
+  height: 22px;
   border-radius: 3px;
-  padding: 3px 6px;
-  font: inherit;
+  background: linear-gradient(180deg, var(--champagne), rgba(233, 216, 180, 0.25));
+  box-shadow: 0 0 14px -2px var(--champagne-edge);
+}
+
+.brand__name {
+  font-weight: 600;
+  letter-spacing: 0.015em;
+  white-space: nowrap;
+}
+
+.chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.chip--quiet {
+  color: var(--text-3);
 }
 
 .spacer {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.meta {
-  color: var(--dim);
+.readout {
+  color: var(--text-3);
+  font: 11px/1 var(--mono);
+  white-space: nowrap;
 }
+@media (max-width: 1180px) {
+  .readout {
+    display: none;
+  }
+}
+
+/* --- tabs ------------------------------------------------------------------- */
+
+.tabs {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  max-width: 34vw;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tabs:empty {
+  display: none;
+}
+
+/* The sliding indicator. One element, moved with a transform, so selection animates without
+   touching layout and without every tab needing its own transition. */
+.tabs__pill {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  height: calc(100% - 6px);
+  border-radius: calc(var(--r-md) - 4px);
+  background: var(--champagne-soft);
+  border: 1px solid var(--champagne-edge);
+  box-shadow: 0 0 18px -6px var(--champagne-edge);
+  transform: translateX(var(--pill-x, 0));
+  width: var(--pill-w, 0);
+  opacity: 0;
+  transition:
+    transform var(--enter) var(--ease-out),
+    width var(--enter) var(--ease-out),
+    opacity 140ms linear;
+  pointer-events: none;
+}
+.tabs--ready .tabs__pill {
+  opacity: 1;
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: calc(var(--r-md) - 4px);
+  background: transparent;
+  color: var(--text-2);
+  font: 500 12px/1 var(--font);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--exit) linear,
+    transform var(--exit) var(--ease-out);
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab:active {
+  transform: scale(0.96);
+}
+.tab[aria-selected="true"] {
+  color: var(--champagne);
+}
+
+.tabs--icons .tab {
+  padding: 0 10px;
+}
+
+/* --- buttons ---------------------------------------------------------------- */
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition:
+    color var(--exit) linear,
+    background var(--exit) linear,
+    border-color var(--exit) linear,
+    transform var(--exit) var(--ease-out);
+}
+.icon-btn.glass {
+  border-color: var(--hairline);
+}
+.icon-btn:hover {
+  color: var(--text);
+  background: var(--glass-strong);
+  transform: translateY(-1px);
+}
+.icon-btn:active {
+  transform: scale(0.94);
+}
+.icon-btn[aria-expanded="true"] {
+  color: var(--champagne);
+  border-color: var(--champagne-edge);
+  background: var(--champagne-soft);
+}
+
+:where(button, [role="tab"], input):focus-visible {
+  outline: 2px solid var(--champagne);
+  outline-offset: 2px;
+}
+
+/* --- status ------------------------------------------------------------------ */
 
 .status {
-  padding: 2px 8px;
-  border-radius: 3px;
-  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--glass);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.status__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  transition: background var(--exit) linear;
 }
 .status--live {
   color: var(--ok);
-  border-color: var(--ok);
+  border-color: rgba(70, 185, 138, 0.35);
+}
+.status--live .status__dot {
+  animation: pulse 2.4s ease-in-out infinite;
 }
 .status--connecting {
   color: var(--warn);
-  border-color: var(--warn);
+  border-color: rgba(224, 160, 60, 0.35);
 }
 .status--down {
-  color: var(--bad);
-  border-color: var(--bad);
+  color: var(--danger);
+  border-color: rgba(255, 107, 102, 0.4);
 }
 
-.readonly {
-  padding: 2px 8px;
-  border: 1px solid var(--ok);
-  color: var(--ok);
-  border-radius: 3px;
-  letter-spacing: 0.08em;
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(70, 185, 138, 0.45);
+  }
+  60% {
+    box-shadow: 0 0 0 6px rgba(70, 185, 138, 0);
+  }
 }
 
-/* --- panes -------------------------------------------------------------- */
+/* --- stage -------------------------------------------------------------------- */
 
 main {
+  position: relative;
+  z-index: 1;
   flex: 1 1 auto;
   display: flex;
   min-height: 0;
 }
 
-.pane {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.pane--chart {
+.stage {
   flex: 1 1 auto;
   min-width: 0;
-  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 8px;
 }
 
-.pane--feed {
-  flex: 0 0 clamp(360px, 32vw, 560px);
-  background: var(--panel);
-  overflow: hidden;
+.legend {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.legend__item--head {
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* A legend entry is also the fastest switch for its series: one click where you are already
+   looking, rather than opening a drawer to find the same control. Pressed-out dims rather than
+   hides, so a switched-off series still tells you it exists. */
+button.legend__item {
+  padding: 3px 7px;
+  margin: -3px 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    opacity var(--exit) linear,
+    background var(--exit) linear,
+    border-color var(--exit) linear,
+    transform var(--exit) var(--ease-out);
+}
+button.legend__item:hover {
+  background: var(--glass-strong);
+  border-color: var(--hairline);
+  transform: translateY(-1px);
+}
+button.legend__item:active {
+  transform: scale(0.96);
+}
+button.legend__item[aria-pressed="false"] {
+  opacity: 0.42;
+}
+.swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
 }
 
 .chart-wrap {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--hairline);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.006));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  overflow: hidden;
 }
 
 #chart {
@@ -156,159 +488,359 @@ main {
   pointer-events: none;
 }
 
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  flex: 0 0 auto;
-}
-
-.legend .swatch {
-  display: inline-block;
-  width: 10px;
-  height: 3px;
-  vertical-align: middle;
-  margin-right: 5px;
-}
-
-.legend .dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  vertical-align: middle;
-  margin-right: 5px;
-}
-
 .notes {
   flex: 0 0 auto;
-  padding: 0 12px;
   color: var(--warn);
-}
-.notes p {
-  margin: 6px 0;
+  font-size: 11.5px;
 }
 .notes:empty {
   display: none;
 }
+.notes p {
+  margin: 4px 0;
+  padding-left: 14px;
+  position: relative;
+}
+.notes p::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 7px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
+}
 
-/* --- grant card --------------------------------------------------------- */
+/* --- drawers -------------------------------------------------------------------- */
+
+.drawer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 0;
+  border-width: 0;
+  transition:
+    width var(--enter) var(--ease-out),
+    transform var(--enter) var(--ease-out),
+    opacity var(--enter) linear;
+}
+
+.drawer--left {
+  width: var(--options-w);
+  border-right: 1px solid var(--hairline);
+  order: -1;
+}
+.drawer--right {
+  width: var(--drawer-w);
+  border-left: 1px solid var(--hairline);
+}
+
+/* Collapsed slides *away from* its own edge, so opening and closing read as the panel coming
+   from and returning to where it lives. Width goes to zero with it so the chart takes the
+   space back; the chart itself is `autoSize`, so it follows without being told. */
+.drawer[data-open="false"] {
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+  border-width: 0;
+  transition-duration: var(--exit);
+  transition-timing-function: var(--ease-in);
+}
+.drawer--left[data-open="false"] {
+  transform: translateX(-24px);
+}
+.drawer--right[data-open="false"] {
+  transform: translateX(24px);
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+.drawer__head h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
+  text-transform: uppercase;
+}
+.drawer__body {
+  padding: 10px;
+  overflow-y: auto;
+  min-width: var(--options-w);
+}
+
+.drawer__rule {
+  height: 1px;
+  margin: 10px 10px;
+  background: var(--hairline);
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  opacity: 0;
+  transition: opacity var(--exit) linear;
+}
+.scrim[data-show="true"] {
+  opacity: 1;
+}
+
+/* --- switches ---------------------------------------------------------------------- */
+
+.switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: 500 12px/1 var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--exit) linear,
+    color var(--exit) linear;
+}
+.switch:hover {
+  background: var(--glass);
+  color: var(--text);
+}
+.switch__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.switch__swatch {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.switch__track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.05);
+  transition:
+    background var(--exit) linear,
+    border-color var(--exit) linear;
+}
+.switch__track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition:
+    transform var(--enter) var(--ease-out),
+    background var(--exit) linear;
+}
+.switch[aria-checked="true"] {
+  color: var(--text);
+}
+.switch[aria-checked="true"] .switch__track {
+  background: var(--champagne-soft);
+  border-color: var(--champagne-edge);
+}
+.switch[aria-checked="true"] .switch__track::after {
+  transform: translateX(15px);
+  background: var(--champagne);
+}
+
+/* --- grant card ----------------------------------------------------------------------- */
 
 .grant {
   flex: 0 0 auto;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-2);
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
 }
-
-.grant .state {
-  font-weight: 700;
-  letter-spacing: 0.06em;
+.grant__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
-.grant .state--ADVISORY {
+.grant__state {
+  font: 600 12px/1 var(--font);
+  letter-spacing: 0.1em;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.grant__state--ADVISORY {
   color: var(--ok);
 }
-.grant .state--GRANTED {
+.grant__state--GRANTED {
   color: var(--warn);
 }
-.grant .state--REVOKED {
-  color: var(--muted);
+.grant__state--REVOKED {
+  color: var(--text-3);
 }
-
-.grant .reason {
-  color: var(--muted);
-  margin-top: 4px;
-}
-
-.grant .countdown {
+.grant__countdown {
   color: var(--warn);
+  font: 12px/1 var(--mono);
+}
+.grant__reason {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
 }
 
-/* --- feed --------------------------------------------------------------- */
+/* --- feed ------------------------------------------------------------------------------ */
 
 .feed {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 0 12px 40px;
+  overscroll-behavior: contain;
+  padding: 10px 14px 40px;
+  min-width: var(--drawer-w);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+.feed::-webkit-scrollbar {
+  width: 10px;
+}
+.feed::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 
 .entry {
-  border-bottom: 1px solid var(--line);
-  padding: 10px 0;
+  padding: 12px;
+  margin: 8px 0;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  transition:
+    background var(--exit) linear,
+    border-color var(--exit) linear,
+    transform var(--exit) var(--ease-out);
+  /* Staggered on arrival — see `--delay` set per entry in app.js. */
+  animation: entry-in var(--enter) var(--ease-out) both;
+  animation-delay: var(--delay, 0ms);
+}
+.entry:hover {
+  background: var(--glass);
+  border-color: var(--hairline);
+  transform: translateX(-2px);
+}
+.entry--fired {
+  border-left: 2px solid var(--champagne-edge);
+}
+
+@keyframes entry-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .entry__head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-
 .entry__time {
+  font: 600 12px/1 var(--mono);
   color: var(--text);
-  font-weight: 600;
 }
 
 .badge {
-  padding: 1px 6px;
-  border-radius: 3px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  color: var(--text-3);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
 }
 .badge--fired {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-.badge--long {
-  color: var(--long);
-  border-color: var(--long);
-}
-.badge--short {
-  color: var(--short);
-  border-color: var(--short);
+  color: var(--champagne);
+  border-color: var(--champagne-edge);
+  background: var(--champagne-soft);
 }
 
 .reason {
-  color: var(--muted);
-  margin: 4px 0;
+  margin: 6px 0;
+  color: var(--text-2);
+  font-size: 12px;
 }
 
 .regime {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
-  margin: 4px 0;
-  color: var(--muted);
+  gap: 4px 6px;
+  margin: 8px 0;
 }
-.regime b {
-  color: var(--text);
-  font-weight: 600;
+.regime span {
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--hairline);
+  color: var(--text-2);
+  font: 11px/1.3 var(--mono);
 }
 
 table.votes {
   width: 100%;
   border-collapse: collapse;
-  margin: 6px 0;
+  margin: 8px 0 4px;
+  font-size: 11.5px;
 }
 table.votes th {
   text-align: left;
-  color: var(--dim);
-  font-weight: 400;
-  border-bottom: 1px solid var(--line);
+  font-weight: 500;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--hairline);
+  padding: 0 10px 4px 0;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
 }
-table.votes td,
-table.votes th {
-  padding: 2px 6px 2px 0;
+table.votes td {
+  padding: 4px 8px 4px 0;
   vertical-align: top;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+}
+table.votes td:nth-child(2),
+table.votes td:nth-child(4) {
+  font-family: var(--mono);
 }
 tr.vote--gated td,
 tr.vote--silent td {
-  color: var(--dim);
+  color: var(--text-3);
 }
 td.dir--LONG {
   color: var(--long);
@@ -318,67 +850,150 @@ td.dir--SHORT {
 }
 
 .section {
-  margin: 8px 0 0;
-  padding: 6px 8px;
-  background: var(--panel-2);
-  border-left: 2px solid var(--line);
+  margin-top: 8px;
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--hairline-lit);
 }
 .section h4 {
-  margin: 0 0 4px;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  color: var(--dim);
+  margin: 0 0 5px;
+  font-size: 10px;
   font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
 }
 .section p {
   margin: 0;
   white-space: pre-wrap;
+  font-size: 12px;
+  color: var(--text);
 }
 .section .provenance {
-  color: var(--dim);
-  font-size: 11px;
-  margin-top: 4px;
-}
-
-.section--absent {
-  color: var(--dim);
-  border-left-color: var(--dim);
-}
-.section--discarded {
-  border-left-color: var(--bad);
-  color: var(--bad);
+  margin-top: 6px;
+  color: var(--text-3);
+  font: 10.5px/1.4 var(--mono);
 }
 .section--pattern {
   border-left-color: var(--warn);
 }
+.section--discarded {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+.section--trade {
+  border-left-color: var(--champagne-edge);
+}
 
 .context-only {
+  display: inline-block;
+  margin-bottom: 5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
   color: var(--warn);
-  letter-spacing: 0.06em;
-  font-size: 11px;
+  font-size: 9.5px;
   font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .advisory-only {
-  color: var(--dim);
-  font-size: 11px;
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
 }
 
 table.analogues {
   width: 100%;
   border-collapse: collapse;
+  margin-top: 6px;
+  font: 11px/1.4 var(--mono);
 }
 table.analogues th {
   text-align: left;
-  color: var(--dim);
   font-weight: 400;
+  color: var(--text-3);
+  padding-bottom: 3px;
 }
-table.analogues td,
-table.analogues th {
-  padding: 1px 6px 1px 0;
+table.analogues td {
+  padding: 2px 6px 2px 0;
+  color: var(--text-2);
 }
 
 .empty {
-  color: var(--dim);
-  padding: 20px 0;
+  padding: 32px 8px;
+  color: var(--text-3);
+  text-align: center;
+}
+
+/* --- responsive ---------------------------------------------------------------------- */
+
+/* Below this the drawers stop taking space from the chart and float over it instead: on a
+   narrow screen a docked 420px panel leaves the chart unreadable, which is worse than
+   covering it on purpose. */
+@media (max-width: 1100px) {
+  .drawer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 4;
+    width: min(var(--drawer-w), 88vw);
+    border-radius: 0;
+  }
+  .drawer--left {
+    left: 0;
+    width: min(var(--options-w), 80vw);
+  }
+  .drawer--right {
+    right: 0;
+  }
+  .drawer[data-open="false"] {
+    width: min(var(--drawer-w), 88vw);
+    opacity: 0;
+  }
+  .drawer--left[data-open="false"] {
+    transform: translateX(-100%);
+  }
+  .drawer--right[data-open="false"] {
+    transform: translateX(100%);
+  }
+  .tabs {
+    max-width: 46vw;
+  }
+}
+
+/* The chart-type tabs are icon-first. Their labels are the first thing to go when the bar is
+   tight — the icons carry the meaning, and every one keeps its `title` and `aria-label`. */
+@media (max-width: 1400px) {
+  .tabs--icons .tab__label {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .brand__name,
+  .status__text {
+    display: none;
+  }
+  .topbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* --- reduced motion --------------------------------------------------------------------- */
+
+/* Movement here is meaning — which panel came from which edge, which entry is new. With
+   motion turned down the meaning has to survive, so states still change instantly and
+   nothing is left mid-transition. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .drawer[data-open="false"] {
+    transform: none;
+  }
 }

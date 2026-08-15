@@ -1,61 +1,147 @@
 <!doctype html>
 <!--
-  The instrument panel. Two panes: our bars on the left, the agent's reasoning on the right.
+  The instrument panel. Our bars on the left, the agent's reasoning on the right.
 
   No build step, no framework, no CDN. Everything this page loads comes from this container,
-  which is the only way it still renders when the network is the thing being debugged.
+  which is the only way it still renders when the network is the thing being debugged. That
+  includes the icons: they are an inline SVG sprite at the bottom of this file, referenced with
+  <use>. No icon font, and no emoji standing in for one.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>FX regime agent — instrument panel</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <header class="bar">
-      <span class="title">FX regime agent</span>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__name">FX regime agent</span>
+        <span class="chip chip--quiet" title="This process has no route that can change anything."
+          >READ ONLY</span
+        >
+      </div>
 
-      <label class="control">
-        symbol
-        <select id="symbol" aria-label="symbol"></select>
-      </label>
+      <div class="tabs glass" role="tablist" aria-label="Symbol" id="symbol-tabs">
+        <span class="tabs__pill" aria-hidden="true"></span>
+      </div>
 
-      <label class="control">
-        timeframe
-        <select id="timeframe" aria-label="timeframe"></select>
-      </label>
+      <div class="tabs glass" role="tablist" aria-label="Timeframe" id="timeframe-tabs">
+        <span class="tabs__pill" aria-hidden="true"></span>
+      </div>
+
+      <div class="tabs glass tabs--icons" role="tablist" aria-label="Chart type" id="type-tabs">
+        <span class="tabs__pill" aria-hidden="true"></span>
+      </div>
 
       <span class="spacer"></span>
 
-      <span id="source" class="meta" title="which provider's bars are drawn"></span>
-      <span id="generated" class="meta" title="when this snapshot was built"></span>
-      <span id="status" class="status status--connecting">connecting</span>
-      <span class="readonly" title="This process has no route that can change anything.">
-        READ ONLY
+      <span class="readout" id="source" title="which provider's bars are drawn"></span>
+      <span class="readout" id="generated" title="when this snapshot was built"></span>
+
+      <span class="status" id="status" role="status" aria-live="polite">
+        <span class="status__dot" aria-hidden="true"></span>
+        <span class="status__text">connecting</span>
       </span>
+
+      <button
+        type="button"
+        class="icon-btn glass"
+        id="toggle-options"
+        aria-label="View options"
+        aria-expanded="false"
+        aria-controls="options-drawer"
+      >
+        <svg class="icon" aria-hidden="true"><use href="#i-sliders" /></svg>
+      </button>
+
+      <button
+        type="button"
+        class="icon-btn glass"
+        id="toggle-feed"
+        aria-label="Agent panel"
+        aria-expanded="true"
+        aria-controls="feed-drawer"
+      >
+        <svg class="icon" aria-hidden="true"><use href="#i-panel" /></svg>
+      </button>
     </header>
 
     <main>
-      <section class="pane pane--chart">
-        <div id="legend" class="legend"></div>
+      <!-- Left drawer: what is drawn. Every toggle here hides a series that is already on the
+           client, so nothing round-trips and nothing is recomputed. -->
+      <aside class="drawer drawer--left glass" id="options-drawer" aria-label="View options">
+        <div class="drawer__head">
+          <h2>View</h2>
+          <button type="button" class="icon-btn" id="close-options" aria-label="Close view options">
+            <svg class="icon" aria-hidden="true"><use href="#i-close" /></svg>
+          </button>
+        </div>
+        <div class="drawer__body" id="overlay-toggles"></div>
+      </aside>
+
+      <section class="stage">
+        <div class="legend glass" id="legend"></div>
+
         <div class="chart-wrap">
           <div id="chart"></div>
           <!-- Session shading is painted here, over the chart, because Lightweight Charts has
                no background-band API. Bands are positioned from bar indices, never from wall
-               clock arithmetic, so daylight saving is the server's problem and not this
-               file's. -->
+               clock arithmetic, so daylight saving is the server's problem, not this file's. -->
           <canvas id="sessions"></canvas>
         </div>
-        <div id="chart-notes" class="notes"></div>
+
+        <div class="notes" id="chart-notes" role="status" aria-live="polite"></div>
       </section>
 
-      <aside class="pane pane--feed">
-        <div id="grant" class="grant"></div>
-        <div id="feed-notes" class="notes"></div>
-        <div id="feed" class="feed"></div>
+      <!-- Right drawer: why. Docked on a wide screen, slides over the chart on a narrow one. -->
+      <aside class="drawer drawer--right glass" id="feed-drawer" aria-label="Agent panel">
+        <div class="grant" id="grant"></div>
+        <div class="notes" id="feed-notes"></div>
+        <div class="feed" id="feed"></div>
       </aside>
+
+      <div class="scrim" id="scrim" hidden></div>
     </main>
+
+    <!-- Icon sprite. Stroke icons, one family, 1.5px, 24x24 — consistent by construction. -->
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-candles" viewBox="0 0 24 24">
+        <path d="M7 3v4m0 10v4M17 3v6m0 8v4" />
+        <rect x="4.5" y="7" width="5" height="10" rx="1" />
+        <rect x="14.5" y="9" width="5" height="8" rx="1" />
+      </symbol>
+      <symbol id="i-bars" viewBox="0 0 24 24">
+        <path d="M7 4v16M17 4v16M7 8h-3M7 15h3M17 7h3M17 16h-3" />
+      </symbol>
+      <symbol id="i-line" viewBox="0 0 24 24">
+        <path d="M3 17l5-6 4 3 5-8 4 4" />
+      </symbol>
+      <symbol id="i-area" viewBox="0 0 24 24">
+        <path d="M3 16l5-6 4 3 5-7 4 4" />
+        <path d="M3 16l5-6 4 3 5-7 4 4v7H3z" class="fill" />
+      </symbol>
+      <symbol id="i-baseline" viewBox="0 0 24 24">
+        <path d="M3 18l4-5 4 2 4-8 5 6" />
+        <path d="M3 12h18" class="dashed" />
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <path d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h9M17 17h3" />
+        <circle cx="16" cy="7" r="2" />
+        <circle cx="10" cy="12" r="2" />
+        <circle cx="15" cy="17" r="2" />
+      </symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M15 4v16" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="M6 6l12 12M18 6L6 18" />
+      </symbol>
+    </svg>
 
     <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
     <script src="/static/app.js"></script>

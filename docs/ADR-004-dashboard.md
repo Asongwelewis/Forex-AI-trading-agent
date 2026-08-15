@@ -84,6 +84,52 @@ Grant state is the same shape: `fxagent.permission` is a stub, so `AdvisoryOnly`
 ADVISORY with the reason spelled out, and a reader that raises degrades to ADVISORY. There is
 no path through `grant.py` that reports GRANTED because something was unavailable.
 
+## The theme is desaturated on purpose
+
+**Obsidian**: graphite glass over near-black, with champagne (`#e9d8b4`) as the only highlight.
+Tabs, drawers and the top bar are translucent with a hairline border and an inset top
+highlight — depth from light rather than from drop shadows.
+
+The chrome carries **no hue of its own**, and that is the load-bearing decision rather than a
+taste one. This screen already spends colour on meaning: green and red candles, amber
+`session_breakout`, teal `range_reversion` and violet `carry_divergence` markers, and four
+session bands. A brand colour with an opinion would have to sit next to all of them, and every
+one would get harder to read to buy the panel a personality it does not need. Champagne is
+near-neutral, so selection *glows* rather than recolouring, and hue on this screen means data.
+
+The same logic set the session bands at 0.06 alpha (0.085 for the overlap). At 0.10 they read
+as a barcode drawn over the candles instead of as the ground the candles sit on — visible in
+the first screenshot of the redesign and fixed by looking at it.
+
+Motion is 160–280ms, transform and opacity only. Entering eases out, exiting eases in at about
+65% of the duration, so dismissing always feels quicker than opening. Feed entries stagger in
+at 40ms apart **only when they are new** — re-animating the whole list on every push would make
+a quiet market look busy, which is the opposite of what the panel is for. All of it collapses
+under `prefers-reduced-motion`.
+
+Type is the system stack with `tabular-nums`. No webfont: the page must render with no network,
+and a data panel whose digits change width jitters on every tick.
+
+## The chart type is a view, not a request
+
+Candles, bars, line, area and baseline all read the same payload — the OHLC forms take the bar,
+the single-value forms take its close. Switching asks the server for nothing.
+
+It does tear down and rebuild the whole price layer rather than swapping one series, because
+Lightweight Charts draws series in creation order: recreating only the price series would put
+the candles over the overlays in one view and under them in another.
+
+The overlays themselves are switchable from the left drawer *and* from the legend, which is the
+faster of the two — one click where you are already looking. `bb_upper`/`bb_middle`/`bb_lower`
+is one switch, because it is one thing to a reader. Selections persist in `localStorage`.
+
+## A front-end error is shown, not logged
+
+A silent script failure would leave the last snapshot frozen on screen looking perfectly
+current. For a panel meant to be watched from across a room that is the one unacceptable
+failure mode — a stale chart that still says "live" is worse than a blank one. `window.error`
+and `unhandledrejection` both flip the status pill and print the reason on the chart.
+
 ## The charting library is vendored and pinned
 
 Lightweight Charts v4.2.3, Apache 2.0, committed under

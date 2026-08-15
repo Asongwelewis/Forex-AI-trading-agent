@@ -1,49 +1,122 @@
 /*
  * The panel's front end. Vanilla, deliberately.
  *
- * It does three things: keep one WebSocket open, redraw the chart when a snapshot arrives, and
- * render the feed. It computes nothing. Every price, every level, every session boundary and
- * every marker is calculated on the server from the same code the strategies read — this file
- * would be the easiest place in the system to introduce a second, subtly different definition
- * of "the London session" or "the 20-period EMA", so it is not allowed to have one.
+ * It does four things: keep one WebSocket open, draw the price series in whichever form is
+ * selected, paint the session bands, and render the feed. It computes nothing. Every price,
+ * level, session boundary and marker is calculated on the server from the same code the
+ * strategies read — this file would be the easiest place in the system to introduce a second,
+ * subtly different definition of "the London session" or "the 20-period EMA", so it is not
+ * allowed to have one.
  *
- * The single exception is the grant countdown, which ticks locally against `expires_at`. A
- * countdown pushed over a socket would measure network latency as well as time remaining.
+ * Two exceptions, both deliberate. The grant countdown ticks locally against `expires_at`,
+ * because a countdown pushed over a socket would measure network latency as well as time
+ * remaining. And the chart *type* is a client-side view of the same candles — switching from
+ * candles to a line re-reads `close`, it does not ask the server for anything.
+ *
+ * All user-visible text goes through `textContent`. Agent narration is prose from a language
+ * model and reasons are stored strings; neither is ever interpolated into markup.
  */
 
 "use strict";
 
 const LWC = window.LightweightCharts;
+const SVG_NS = "http://www.w3.org/2000/svg";
+const STORE_KEY = "fxagent.panel.v1";
+
+/** Every form the price series can take. Same bars, different reading of them. */
+const CHART_TYPES = [
+  { key: "candles", label: "Candles", icon: "i-candles" },
+  { key: "bars", label: "Bars", icon: "i-bars" },
+  { key: "line", label: "Line", icon: "i-line" },
+  { key: "area", label: "Area", icon: "i-area" },
+  { key: "baseline", label: "Baseline", icon: "i-baseline" },
+];
+
+/* Mirrors --tokyo/--london/--newyork/--overlap in styles.css. Duplicated because the bands are
+   painted onto a canvas, which cannot read a CSS custom property; kept adjacent in both files
+   so a change to one is obvious in the other. */
+const SESSION_FILL = {
+  TOKYO: "rgba(120, 160, 220, 0.06)",
+  LONDON: "rgba(230, 170, 80, 0.06)",
+  NEW_YORK: "rgba(150, 120, 210, 0.06)",
+  OVERLAP: "rgba(230, 120, 120, 0.085)",
+};
+
+const PALETTE = {
+  up: "#31c9a4",
+  down: "#f2555a",
+  line: "#e9d8b4",
+  text: "#e8ebf1",
+  muted: "#6a7383",
+  hairline: "rgba(255, 255, 255, 0.06)",
+  surface: "#07090c",
+};
 
 const state = {
   socket: null,
   snapshot: null,
   chart: null,
-  candles: null,
+  priceSeries: null,
+  chartType: "candles",
   overlays: new Map(), // key -> ISeriesApi
-  tradeLines: [], // { series, id }
-  times: [], // candle times, ascending — the index the session bands are positioned from
+  tradeLines: [],
+  times: [],
   bands: [],
+  hidden: new Set(), // overlay group keys the user switched off
+  layers: { sessions: true, markers: true, trades: true },
+  drawers: { options: false, feed: true },
+  seenEntries: new Set(),
   grantExpiry: null,
   reconnectDelay: 1000,
 };
 
-const SESSION_FILL = {
-  TOKYO: "rgba(120, 160, 220, 0.10)",
-  LONDON: "rgba(230, 170, 80, 0.10)",
-  NEW_YORK: "rgba(150, 120, 210, 0.10)",
-  OVERLAP: "rgba(230, 120, 120, 0.12)",
-};
+// --- storage -----------------------------------------------------------------
 
-// --- tiny DOM helpers --------------------------------------------------------
-// Everything user-visible goes through textContent. Agent narration is prose from a language
-// model and trade reasons are stored strings; neither is ever interpolated into markup.
+function load() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+    if (CHART_TYPES.some((t) => t.key === saved.chartType)) state.chartType = saved.chartType;
+    if (Array.isArray(saved.hidden)) state.hidden = new Set(saved.hidden);
+    if (saved.layers) Object.assign(state.layers, saved.layers);
+    if (saved.drawers) Object.assign(state.drawers, saved.drawers);
+  } catch {
+    // A corrupt preference is not worth a broken panel; the defaults are all usable.
+  }
+}
+
+function save() {
+  try {
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        chartType: state.chartType,
+        hidden: [...state.hidden],
+        layers: state.layers,
+        drawers: state.drawers,
+      }),
+    );
+  } catch {
+    /* private mode, quota — neither is a reason to stop working */
+  }
+}
+
+// --- DOM helpers ---------------------------------------------------------------
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", `#${name}`);
+  svg.appendChild(use);
+  return svg;
 }
 
 function clear(node) {
@@ -54,7 +127,7 @@ function fmt(value, digits) {
   return value === null || value === undefined ? "—" : Number(value).toFixed(digits);
 }
 
-/** ISO instant -> "2026-08-15 08:00Z". The panel is a UTC instrument; local time would make
+/** ISO instant -> "2026-08-15 08:00Z". The panel is a UTC instrument: local time would make
  *  two people reading the same screen in two places disagree about when a bar was. */
 function stamp(iso) {
   if (!iso) return "—";
@@ -63,69 +136,208 @@ function stamp(iso) {
   return at.toISOString().replace("T", " ").slice(0, 16) + "Z";
 }
 
-// --- chart -------------------------------------------------------------------
+// --- tab groups ----------------------------------------------------------------
+
+/**
+ * A glass tab strip with one sliding indicator.
+ *
+ * The indicator is a single element moved with a transform rather than a border on each tab,
+ * so selection animates without touching layout — and so the movement itself says *which way*
+ * you went, which a border appearing somewhere else cannot.
+ */
+function renderTabs(container, items, selected, onSelect) {
+  const pill = container.querySelector(".tabs__pill");
+  clear(container);
+  container.appendChild(pill);
+
+  items.forEach((item) => {
+    const tab = el("button", "tab");
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(item.key === selected));
+    tab.dataset.key = item.key;
+
+    if (item.icon) tab.appendChild(icon(item.icon));
+    tab.appendChild(el("span", "tab__label", item.label));
+    if (item.icon) tab.title = item.label;
+
+    tab.addEventListener("click", () => onSelect(item.key));
+    container.appendChild(tab);
+  });
+
+  movePill(container);
+}
+
+function movePill(container) {
+  const active = container.querySelector('.tab[aria-selected="true"]');
+  const pill = container.querySelector(".tabs__pill");
+  if (!active || !pill) return;
+
+  container.style.setProperty("--pill-x", `${active.offsetLeft - container.clientLeft}px`);
+  container.style.setProperty("--pill-w", `${active.offsetWidth}px`);
+  container.classList.add("tabs--ready");
+}
+
+function selectTab(container, key) {
+  container.querySelectorAll(".tab").forEach((tab) => {
+    tab.setAttribute("aria-selected", String(tab.dataset.key === key));
+  });
+  movePill(container);
+}
+
+// --- chart ---------------------------------------------------------------------
 
 function buildChart() {
-  const container = document.getElementById("chart");
-  const chart = LWC.createChart(container, {
-    layout: { background: { color: "#14161a" }, textColor: "#8a909b" },
-    grid: {
-      vertLines: { color: "rgba(43, 48, 56, 0.6)" },
-      horzLines: { color: "rgba(43, 48, 56, 0.6)" },
+  const chart = LWC.createChart(document.getElementById("chart"), {
+    // v4's own ResizeObserver. The drawers animate their width, so the chart is resized on
+    // every frame of that transition; letting the library own it beats racing it.
+    autoSize: true,
+    layout: {
+      background: { color: "transparent" },
+      textColor: PALETTE.muted,
+      fontFamily: getComputedStyle(document.body).fontFamily,
     },
-    rightPriceScale: { borderColor: "#2b3038" },
-    timeScale: { borderColor: "#2b3038", timeVisible: true, secondsVisible: false },
-    crosshair: { mode: LWC.CrosshairMode.Normal },
+    grid: {
+      vertLines: { color: PALETTE.hairline },
+      horzLines: { color: PALETTE.hairline },
+    },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.09)" },
+    timeScale: {
+      borderColor: "rgba(255,255,255,0.09)",
+      timeVisible: true,
+      secondsVisible: false,
+    },
+    crosshair: {
+      mode: LWC.CrosshairMode.Normal,
+      vertLine: { color: "rgba(233,216,180,0.35)", labelBackgroundColor: "#1a1d24" },
+      horzLine: { color: "rgba(233,216,180,0.35)", labelBackgroundColor: "#1a1d24" },
+    },
     localization: {
       // Axis labels in UTC, matching everything else on the page.
       timeFormatter: (t) => new Date(t * 1000).toISOString().slice(11, 16) + "Z",
     },
   });
 
-  const candles = chart.addCandlestickSeries({
-    upColor: "#26a69a",
-    downColor: "#ef5350",
-    borderUpColor: "#26a69a",
-    borderDownColor: "#ef5350",
-    wickUpColor: "#26a69a",
-    wickDownColor: "#ef5350",
-  });
-
   state.chart = chart;
-  state.candles = candles;
-
   chart.timeScale().subscribeVisibleLogicalRangeChange(drawSessions);
-  window.addEventListener("resize", () => {
+
+  const wrap = document.querySelector(".chart-wrap");
+  new ResizeObserver(() => {
     resizeCanvas();
     drawSessions();
-  });
+  }).observe(wrap);
+}
+
+/** Create the price series in the currently selected form. Same bars either way. */
+function createPriceSeries(precision, candles) {
+  const format = { type: "price", precision, minMove: Math.pow(10, -precision) };
+  const common = { priceFormat: format, priceLineVisible: true, lastValueVisible: true };
+
+  switch (state.chartType) {
+    case "bars":
+      return state.chart.addBarSeries({
+        ...common,
+        upColor: PALETTE.up,
+        downColor: PALETTE.down,
+        thinBars: false,
+      });
+    case "line":
+      return state.chart.addLineSeries({ ...common, color: PALETTE.line, lineWidth: 2 });
+    case "area":
+      return state.chart.addAreaSeries({
+        ...common,
+        lineColor: PALETTE.line,
+        lineWidth: 2,
+        topColor: "rgba(233, 216, 180, 0.22)",
+        bottomColor: "rgba(233, 216, 180, 0.01)",
+      });
+    case "baseline":
+      // Anchored on the first close on screen, so the shading answers "up or down over this
+      // window" — which is the only question a baseline is any good at.
+      return state.chart.addBaselineSeries({
+        ...common,
+        baseValue: { type: "price", price: candles.length ? candles[0].close : 0 },
+        topLineColor: PALETTE.up,
+        topFillColor1: "rgba(49, 201, 164, 0.22)",
+        topFillColor2: "rgba(49, 201, 164, 0.02)",
+        bottomLineColor: PALETTE.down,
+        bottomFillColor1: "rgba(242, 85, 90, 0.02)",
+        bottomFillColor2: "rgba(242, 85, 90, 0.22)",
+      });
+    default:
+      return state.chart.addCandlestickSeries({
+        ...common,
+        upColor: PALETTE.up,
+        downColor: PALETTE.down,
+        borderUpColor: PALETTE.up,
+        borderDownColor: PALETTE.down,
+        wickUpColor: "rgba(49, 201, 164, 0.8)",
+        wickDownColor: "rgba(242, 85, 90, 0.8)",
+      });
+  }
+}
+
+/** OHLC forms take the bar; single-value forms take its close. */
+function priceData(candles) {
+  if (state.chartType === "candles" || state.chartType === "bars") return candles;
+  return candles.map((candle) => ({ time: candle.time, value: candle.close }));
+}
+
+function setChartType(next) {
+  if (next === state.chartType) return;
+  state.chartType = next;
+  save();
+  selectTab(document.getElementById("type-tabs"), next);
+
+  // Tear the whole price layer down and rebuild it from the cached snapshot. Lightweight
+  // Charts draws series in creation order, so recreating only the price series would put the
+  // candles on top of the overlays in one view and underneath in another.
+  if (state.priceSeries) {
+    state.chart.removeSeries(state.priceSeries);
+    state.priceSeries = null;
+  }
+  for (const series of state.overlays.values()) state.chart.removeSeries(series);
+  state.overlays.clear();
+  for (const line of state.tradeLines) state.chart.removeSeries(line);
+  state.tradeLines = [];
+
+  if (state.snapshot) applyChart(state.snapshot.chart);
 }
 
 function applyChart(payload) {
   const precision = payload.price_precision;
-  state.candles.applyOptions({
-    priceFormat: { type: "price", precision, minMove: Math.pow(10, -precision) },
-  });
-  state.candles.setData(payload.candles);
+
+  if (!state.priceSeries) {
+    state.priceSeries = createPriceSeries(precision, payload.candles);
+  }
+  state.priceSeries.setData(priceData(payload.candles));
+
   state.times = payload.candles.map((candle) => candle.time);
   state.bands = payload.session_bands;
 
   applyOverlays(payload.overlays);
   applyTradeLines(payload.trades, precision);
-  state.candles.setMarkers(
-    payload.markers.map((marker) => ({
-      time: marker.time,
-      position: marker.position,
-      shape: marker.shape,
-      color: marker.colour,
-      text: marker.text,
-    })),
-  );
+  applyMarkers(payload.markers);
 
   renderLegend(payload);
+  renderOverlayToggles(payload);
   renderNotes(document.getElementById("chart-notes"), payload.notes);
   resizeCanvas();
   drawSessions();
+}
+
+/** `bb_upper` and `bb_lower` are one thing to a reader, so they are one switch. */
+function groupOf(key) {
+  if (key.startsWith("bb_")) return "bollinger";
+  if (key.startsWith("asian_")) return "asian";
+  return key;
+}
+
+function groupLabel(overlay) {
+  const group = groupOf(overlay.key);
+  if (group === "bollinger") return overlay.label.replace(/ (upper|mid|lower)$/, "");
+  if (group === "asian") return "Asian range";
+  return overlay.label;
 }
 
 /** Overlays are keyed, so a redraw updates the series in place instead of dropping and
@@ -147,6 +359,7 @@ function applyOverlays(overlays) {
       });
       state.overlays.set(overlay.key, series);
     }
+    series.applyOptions({ visible: !state.hidden.has(groupOf(overlay.key)) });
     // A point with a null value becomes whitespace, which breaks the line rather than drawing
     // through a gap. See the note on holes in `dashboard/models.py`.
     series.setData(
@@ -166,17 +379,33 @@ function applyOverlays(overlays) {
   }
 }
 
+function applyMarkers(markers) {
+  if (!state.priceSeries) return;
+  state.priceSeries.setMarkers(
+    state.layers.markers
+      ? markers.map((marker) => ({
+          time: marker.time,
+          position: marker.position,
+          shape: marker.shape,
+          color: marker.colour,
+          text: marker.text,
+        }))
+      : [],
+  );
+}
+
 /** Entry, stop and target for each trade, as three two-point lines spanning the position.
  *  Recreated wholesale: trades are few, and a stop that moved would otherwise need diffing. */
 function applyTradeLines(trades, precision) {
   for (const line of state.tradeLines) state.chart.removeSeries(line);
   state.tradeLines = [];
+  if (!state.layers.trades) return;
 
   for (const trade of trades) {
     const levels = [
-      { price: trade.entry_price, colour: "#d8dce3", dash: LWC.LineStyle.Solid },
-      { price: trade.stop_price, colour: "#ef5350", dash: LWC.LineStyle.Dashed },
-      { price: trade.target_price, colour: "#26a69a", dash: LWC.LineStyle.Dashed },
+      { price: trade.entry_price, colour: PALETTE.text, dash: LWC.LineStyle.Solid },
+      { price: trade.stop_price, colour: PALETTE.down, dash: LWC.LineStyle.Dashed },
+      { price: trade.target_price, colour: PALETTE.up, dash: LWC.LineStyle.Dashed },
     ];
     for (const level of levels) {
       const series = state.chart.addLineSeries({
@@ -197,19 +426,49 @@ function applyTradeLines(trades, precision) {
   }
 }
 
+// --- legend and view options ------------------------------------------------------
+
+function toggleGroup(group) {
+  if (state.hidden.has(group)) state.hidden.delete(group);
+  else state.hidden.add(group);
+  save();
+  if (state.snapshot) applyChart(state.snapshot.chart);
+}
+
+function toggleLayer(name) {
+  state.layers[name] = !state.layers[name];
+  save();
+  if (state.snapshot) applyChart(state.snapshot.chart);
+}
+
+/** The legend doubles as the fastest way to switch a series off — one click, where you are
+ *  already looking, instead of opening a drawer to find the same switch. */
 function renderLegend(payload) {
   const legend = document.getElementById("legend");
   clear(legend);
 
-  legend.appendChild(el("span", null, `${payload.symbol} ${payload.timeframe}`));
+  const head = el("span", "legend__item legend__item--head");
+  head.appendChild(el("span", null, `${payload.symbol} · ${payload.timeframe}`));
+  legend.appendChild(head);
 
+  const groups = new Map();
   for (const overlay of payload.overlays) {
-    const item = el("span");
+    const group = groupOf(overlay.key);
+    if (!groups.has(group)) groups.set(group, { label: groupLabel(overlay), colour: overlay.colour });
+  }
+
+  for (const [group, meta] of groups) {
+    const button = el("button", "legend__item");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(!state.hidden.has(group)));
+    button.title = `Show or hide ${meta.label}`;
+
     const swatch = el("span", "swatch");
-    swatch.style.background = overlay.colour;
-    item.appendChild(swatch);
-    item.appendChild(el("span", null, overlay.label));
-    legend.appendChild(item);
+    swatch.style.background = meta.colour;
+    button.appendChild(swatch);
+    button.appendChild(el("span", null, meta.label));
+    button.addEventListener("click", () => toggleGroup(group));
+    legend.appendChild(button);
   }
 
   const strategies = new Map();
@@ -219,25 +478,61 @@ function renderLegend(payload) {
     }
   }
   for (const [strategy, colour] of strategies) {
-    const item = el("span");
+    const item = el("span", "legend__item");
     const dot = el("span", "dot");
     dot.style.background = colour;
     item.appendChild(dot);
     item.appendChild(el("span", null, strategy));
     legend.appendChild(item);
   }
-
-  for (const [session, fill] of Object.entries(SESSION_FILL)) {
-    const item = el("span");
-    const swatch = el("span", "swatch");
-    swatch.style.background = fill.replace(/0\.1\d?\)/, "0.5)");
-    item.appendChild(swatch);
-    item.appendChild(el("span", null, session));
-    legend.appendChild(item);
-  }
 }
 
-// --- session shading ---------------------------------------------------------
+function switchRow(label, checked, colour, onToggle) {
+  const row = el("button", "switch");
+  row.type = "button";
+  row.setAttribute("role", "switch");
+  row.setAttribute("aria-checked", String(checked));
+
+  const left = el("span", "switch__label");
+  if (colour) {
+    const swatch = el("span", "switch__swatch");
+    swatch.style.background = colour;
+    left.appendChild(swatch);
+  }
+  left.appendChild(el("span", null, label));
+
+  row.appendChild(left);
+  row.appendChild(el("span", "switch__track"));
+  row.addEventListener("click", onToggle);
+  return row;
+}
+
+function renderOverlayToggles(payload) {
+  const host = document.getElementById("overlay-toggles");
+  clear(host);
+
+  const groups = new Map();
+  for (const overlay of payload.overlays) {
+    const group = groupOf(overlay.key);
+    if (!groups.has(group)) groups.set(group, { label: groupLabel(overlay), colour: overlay.colour });
+  }
+  for (const [group, meta] of groups) {
+    host.appendChild(
+      switchRow(meta.label, !state.hidden.has(group), meta.colour, () => toggleGroup(group)),
+    );
+  }
+
+  host.appendChild(el("div", "drawer__rule"));
+  host.appendChild(
+    switchRow("Session shading", state.layers.sessions, null, () => toggleLayer("sessions")),
+  );
+  host.appendChild(
+    switchRow("Signal markers", state.layers.markers, null, () => toggleLayer("markers")),
+  );
+  host.appendChild(switchRow("Trade levels", state.layers.trades, null, () => toggleLayer("trades")));
+}
+
+// --- session shading ------------------------------------------------------------
 
 function resizeCanvas() {
   const canvas = document.getElementById("sessions");
@@ -247,16 +542,15 @@ function resizeCanvas() {
   canvas.height = Math.floor(wrap.clientHeight * ratio);
   canvas.style.width = wrap.clientWidth + "px";
   canvas.style.height = wrap.clientHeight + "px";
-  const context = canvas.getContext("2d");
-  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  canvas.getContext("2d").setTransform(ratio, 0, 0, ratio, 0, 0);
 }
 
 /**
  * Position a UTC instant on the chart's logical (bar-index) axis.
  *
  * `timeToCoordinate` only answers for times that are in the series data, and a session
- * boundary at 17:00 on a Friday is not a bar on a market that shut at 21:00. So the band edges
- * are interpolated between the bars either side of them and converted through
+ * boundary at 17:00 on a Friday is not a bar on a market that shut at 21:00. So band edges are
+ * interpolated between the bars either side of them and converted through
  * `logicalToCoordinate`, which accepts fractions. A weekend collapses to a hairline, which is
  * correct: no bars means no width on a bar-indexed axis.
  */
@@ -283,7 +577,7 @@ function drawSessions() {
   const wrap = canvas.parentElement;
   context.clearRect(0, 0, wrap.clientWidth, wrap.clientHeight);
 
-  if (!state.chart || state.bands.length === 0) return;
+  if (!state.chart || !state.layers.sessions || state.bands.length === 0) return;
 
   const scale = state.chart.timeScale();
   const visible = scale.getVisibleLogicalRange();
@@ -319,7 +613,7 @@ function drawSessions() {
   context.restore();
 }
 
-// --- feed --------------------------------------------------------------------
+// --- feed ---------------------------------------------------------------------------
 
 function renderNotes(container, notes) {
   clear(container);
@@ -330,20 +624,20 @@ function renderGrant(grant) {
   const card = document.getElementById("grant");
   clear(card);
 
-  const head = el("div");
-  head.appendChild(el("span", `state state--${grant.state}`, grant.state));
+  const row = el("div", "grant__row");
+  row.appendChild(el("span", `grant__state grant__state--${grant.state}`, grant.state));
   if (grant.symbols && grant.symbols.length) {
-    head.appendChild(el("span", "badge", grant.symbols.join(" ")));
+    row.appendChild(el("span", "badge", grant.symbols.join(" ")));
   }
-  const countdown = el("span", "countdown");
+  const countdown = el("span", "grant__countdown");
   countdown.id = "countdown";
-  head.appendChild(countdown);
-  card.appendChild(head);
+  row.appendChild(countdown);
+  card.appendChild(row);
 
   if (grant.granted_at) {
-    card.appendChild(el("div", "reason", `granted ${stamp(grant.granted_at)}`));
+    card.appendChild(el("div", "grant__reason", `granted ${stamp(grant.granted_at)}`));
   }
-  card.appendChild(el("div", "reason", grant.reason));
+  card.appendChild(el("div", "grant__reason", grant.reason));
 
   state.grantExpiry = grant.expires_at ? new Date(grant.expires_at) : null;
   tickCountdown();
@@ -425,7 +719,7 @@ function analoguesTable(analogues) {
 }
 
 function renderEntry(entry) {
-  const node = el("article", "entry");
+  const node = el("article", `entry${entry.fired ? " entry--fired" : ""}`);
 
   const head = el("div", "entry__head");
   head.appendChild(el("span", "entry__time", stamp(entry.timestamp)));
@@ -440,9 +734,9 @@ function renderEntry(entry) {
 
   const regime = el("div", "regime");
   const sessions = entry.regime.sessions.length ? entry.regime.sessions.join(" + ") : "none";
-  regime.appendChild(el("span", null, `session ${sessions}`));
+  regime.appendChild(el("span", null, sessions));
   regime.appendChild(el("span", null, `ADX ${fmt(entry.regime.trend_strength, 1)}`));
-  regime.appendChild(el("span", null, `vol pct ${fmt(entry.regime.volatility_percentile, 0)}`));
+  regime.appendChild(el("span", null, `vol ${fmt(entry.regime.volatility_percentile, 0)}%`));
   regime.appendChild(
     el(
       "span",
@@ -450,7 +744,7 @@ function renderEntry(entry) {
       entry.regime.is_trending ? "trending" : entry.regime.is_ranging ? "ranging" : "neither",
     ),
   );
-  regime.appendChild(el("span", null, entry.regime.market_open ? "market open" : "market shut"));
+  regime.appendChild(el("span", null, entry.regime.market_open ? "open" : "shut"));
   node.appendChild(regime);
 
   const table = el("table", "votes");
@@ -507,7 +801,7 @@ function renderEntry(entry) {
   }
 
   for (const trade of entry.trades) {
-    const section = el("div", "section");
+    const section = el("div", "section section--trade");
     section.appendChild(el("h4", null, `TRADE ${trade.direction} — ${trade.mode}`));
     section.appendChild(
       el(
@@ -559,28 +853,92 @@ function applyFeed(payload) {
     feed.appendChild(el("div", "empty", "No evaluations in this window."));
     return;
   }
-  for (const entry of payload.entries) feed.appendChild(renderEntry(entry));
+
+  // Only genuinely new entries animate in, staggered. Re-animating the whole list on every
+  // push would make a quiet market look busy, which is the opposite of what the panel is for.
+  let staggered = 0;
+  for (const entry of payload.entries) {
+    const node = renderEntry(entry);
+    if (state.seenEntries.has(entry.evaluation_id)) {
+      node.style.animation = "none";
+    } else {
+      node.style.setProperty("--delay", `${Math.min(staggered++ * 40, 240)}ms`);
+      state.seenEntries.add(entry.evaluation_id);
+    }
+    feed.appendChild(node);
+  }
 }
 
-// --- switchers and socket ----------------------------------------------------
+// --- drawers -----------------------------------------------------------------------
+
+const narrow = window.matchMedia("(max-width: 1100px)");
+
+function setDrawer(name, open) {
+  state.drawers[name] = open;
+  save();
+
+  const drawer = document.getElementById(name === "feed" ? "feed-drawer" : "options-drawer");
+  const button = document.getElementById(name === "feed" ? "toggle-feed" : "toggle-options");
+  drawer.dataset.open = String(open);
+  button.setAttribute("aria-expanded", String(open));
+  updateScrim();
+}
+
+/** The scrim only exists where the drawers float over the chart. Docked, there is nothing to
+ *  dismiss and dimming the chart would be dimming the thing you came to look at. */
+function updateScrim() {
+  const scrim = document.getElementById("scrim");
+  const covering = narrow.matches && (state.drawers.options || state.drawers.feed);
+  scrim.hidden = !covering;
+  scrim.dataset.show = String(covering);
+}
+
+function wireDrawers() {
+  for (const name of ["options", "feed"]) setDrawer(name, state.drawers[name]);
+
+  document
+    .getElementById("toggle-options")
+    .addEventListener("click", () => setDrawer("options", !state.drawers.options));
+  document
+    .getElementById("toggle-feed")
+    .addEventListener("click", () => setDrawer("feed", !state.drawers.feed));
+  document.getElementById("close-options").addEventListener("click", () => setDrawer("options", false));
+
+  document.getElementById("scrim").addEventListener("click", () => {
+    setDrawer("options", false);
+    setDrawer("feed", false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !narrow.matches) return;
+    if (state.drawers.options) setDrawer("options", false);
+    else if (state.drawers.feed) setDrawer("feed", false);
+  });
+
+  narrow.addEventListener("change", updateScrim);
+}
+
+// --- switchers and socket ------------------------------------------------------------
 
 function currentView() {
+  const symbols = document.getElementById("symbol-tabs");
+  const timeframes = document.getElementById("timeframe-tabs");
   return {
-    symbol: document.getElementById("symbol").value,
-    timeframe: document.getElementById("timeframe").value,
+    symbol: symbols.querySelector('.tab[aria-selected="true"]')?.dataset.key,
+    timeframe: timeframes.querySelector('.tab[aria-selected="true"]')?.dataset.key,
   };
 }
 
 function setStatus(text, kind) {
   const node = document.getElementById("status");
-  node.textContent = text;
   node.className = `status status--${kind}`;
+  node.querySelector(".status__text").textContent = text;
 }
 
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
-  document.getElementById("source").textContent = `source ${snapshot.chart.source || "—"}`;
-  document.getElementById("generated").textContent = `built ${stamp(snapshot.generated_at)}`;
+  document.getElementById("source").textContent = snapshot.chart.source || "";
+  document.getElementById("generated").textContent = stamp(snapshot.generated_at);
   applyChart(snapshot.chart);
   applyFeed(snapshot.feed);
 }
@@ -594,8 +952,12 @@ function connect() {
   const view = currentView();
   if (!view.symbol) return;
 
+  state.seenEntries.clear();
+
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${protocol}://${location.host}/ws?symbol=${encodeURIComponent(view.symbol)}&timeframe=${encodeURIComponent(view.timeframe)}`;
+  const url =
+    `${protocol}://${location.host}/ws` +
+    `?symbol=${encodeURIComponent(view.symbol)}&timeframe=${encodeURIComponent(view.timeframe)}`;
 
   setStatus("connecting", "connecting");
   const socket = new WebSocket(url);
@@ -629,48 +991,87 @@ function connect() {
 }
 
 function populateSwitchers(options) {
-  const symbolSelect = document.getElementById("symbol");
-  const timeframeSelect = document.getElementById("timeframe");
-
+  const symbolTabs = document.getElementById("symbol-tabs");
+  const timeframeTabs = document.getElementById("timeframe-tabs");
   const wanted = new URLSearchParams(location.search);
+
   const symbols = [...new Set(options.map((option) => option.symbol))].sort();
+  let symbol = wanted.get("symbol");
+  if (!symbols.includes(symbol)) symbol = symbols[0];
 
-  clear(symbolSelect);
-  for (const symbol of symbols) {
-    symbolSelect.appendChild(new Option(symbol, symbol));
-  }
-  if (wanted.get("symbol")) symbolSelect.value = wanted.get("symbol");
-
-  function refreshTimeframes() {
-    const available = [
+  function timeframesFor(forSymbol) {
+    return [
       ...new Set(
-        options
-          .filter((option) => option.symbol === symbolSelect.value)
-          .map((option) => option.timeframe),
+        options.filter((o) => o.symbol === forSymbol).map((option) => option.timeframe),
       ),
     ].sort();
-    const previous = timeframeSelect.value;
-    clear(timeframeSelect);
-    for (const timeframe of available) {
-      timeframeSelect.appendChild(new Option(timeframe, timeframe));
-    }
-    if (available.includes(previous)) timeframeSelect.value = previous;
-    else if (available.includes("H1")) timeframeSelect.value = "H1";
   }
 
-  refreshTimeframes();
-  if (wanted.get("timeframe")) timeframeSelect.value = wanted.get("timeframe");
+  let timeframe = wanted.get("timeframe");
+  const available = timeframesFor(symbol);
+  if (!available.includes(timeframe)) timeframe = available.includes("H1") ? "H1" : available[0];
 
-  symbolSelect.onchange = () => {
-    refreshTimeframes();
-    connect();
+  function drawTimeframes(forSymbol, selected) {
+    renderTabs(
+      timeframeTabs,
+      timeframesFor(forSymbol).map((key) => ({ key, label: key })),
+      selected,
+      (key) => {
+        selectTab(timeframeTabs, key);
+        // Switching view closes the socket and opens another, so one socket is always exactly
+        // one view — see the note on `/ws` in app.py.
+        connect();
+      },
+    );
+  }
+
+  renderTabs(
+    symbolTabs,
+    symbols.map((key) => ({ key, label: key })),
+    symbol,
+    (key) => {
+      selectTab(symbolTabs, key);
+      const list = timeframesFor(key);
+      const keep = currentView().timeframe;
+      drawTimeframes(key, list.includes(keep) ? keep : list[0]);
+      connect();
+    },
+  );
+
+  drawTimeframes(symbol, timeframe);
+}
+
+/**
+ * Put a script error on the panel, not only in a console nobody has open.
+ *
+ * This screen is meant to be watched from across a room. A silent JavaScript failure would
+ * leave the last snapshot frozen on it looking perfectly current, which is the one failure
+ * mode an instrument panel must not have — a stale chart that still says "live" is worse than
+ * a blank one.
+ */
+function surfaceErrors() {
+  const report = (detail) => {
+    setStatus("front-end error", "down");
+    renderNotes(document.getElementById("chart-notes"), [
+      `The panel hit a script error and may now be showing stale data: ${detail}`,
+    ]);
   };
-  // Switching view closes the socket and opens another, so one socket is always exactly one
-  // view — see the note on `/ws` in app.py.
-  timeframeSelect.onchange = connect;
+
+  window.addEventListener("error", (event) => report(event.message || String(event.error)));
+  window.addEventListener("unhandledrejection", (event) => report(String(event.reason)));
 }
 
 async function start() {
+  load();
+  surfaceErrors();
+
+  renderTabs(document.getElementById("type-tabs"), CHART_TYPES, state.chartType, setChartType);
+  wireDrawers();
+  setInterval(tickCountdown, 1000);
+  window.addEventListener("resize", () => {
+    document.querySelectorAll(".tabs").forEach(movePill);
+  });
+
   if (!LWC) {
     renderNotes(document.getElementById("chart-notes"), [
       "The charting library is not vendored. Run `uv run python scripts/vendor_lightweight_charts.py` " +
@@ -680,12 +1081,10 @@ async function start() {
     buildChart();
   }
 
-  setInterval(tickCountdown, 1000);
-
   try {
     const response = await fetch("/api/options");
     const options = await response.json();
-    if (options.length === 0) {
+    if (!Array.isArray(options) || options.length === 0) {
       renderNotes(document.getElementById("chart-notes"), [
         "The store holds no bars yet, so there is nothing to switch between.",
       ]);
