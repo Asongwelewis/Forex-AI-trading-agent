@@ -1188,14 +1188,28 @@ async function start() {
     state.pollSeconds = Number(config.poll_seconds) || 15;
 
     const response = await fetch("/api/options");
-    const options = await response.json();
+    const options = await response.json().catch(() => null);
+
+    // Three different states, and they send you to three different places. "The store could
+    // not be read" is a deployment problem, "the store is empty" is a collector problem, and
+    // conflating them — which this did, by reporting an unreadable store as an empty one —
+    // costs whoever is reading the screen the one clue the server had already worked out.
+    if (!response.ok) {
+      const reason =
+        (options && options.error) || `The server answered ${response.status}.`;
+      setStatus("store error", "down");
+      renderNotes(document.getElementById("chart-notes"), [reason]);
+      return;
+    }
+
     if (!Array.isArray(options) || options.length === 0) {
       renderNotes(document.getElementById("chart-notes"), [
-        "The store holds no bars yet, so there is nothing to switch between.",
+        "The store is reachable but holds no bars yet, so there is nothing to switch between.",
       ]);
       setStatus("no data", "down");
       return;
     }
+
     populateSwitchers(options);
     connect();
   } catch (error) {

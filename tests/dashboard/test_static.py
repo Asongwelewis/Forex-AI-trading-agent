@@ -83,3 +83,14 @@ def test_the_session_colours_agree_between_the_stylesheet_and_the_painter() -> N
 def _colour(value: str) -> tuple[float, ...]:
     """rgba(...) as numbers, so `0.1` and `0.10` compare equal."""
     return tuple(float(part) for part in value[value.index("(") + 1 : -1].split(","))
+
+
+def test_the_client_distinguishes_an_unreadable_store_from_an_empty_one() -> None:
+    """They are different problems with different fixes — a missing environment variable
+    versus a collector that has not run — and the server has already worked out which. The
+    client reporting the first as the second sends the reader to the wrong place."""
+    body = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "if (!response.ok)" in body, "the client must branch on the status, not just the body"
+    assert "options.error" in body, "the server's reason must reach the screen"
+    assert "reachable but holds no bars" in body
