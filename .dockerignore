@@ -1,0 +1,23 @@
+# The build copies pyproject.toml, uv.lock, README.md and fxagent/ explicitly, so this mostly
+# guards against a stray `COPY . .` and keeps the context small on a slow uplink.
+
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.pyc
+
+# Never. `.env` holds the Supabase URL and the API keys; secrets reach the container through
+# the environment, never through a layer that anyone who pulls the image can read back.
+.env
+*.key
+*.pem
+
+tests
+docs
+scripts
+docker-compose*.yml
+Dockerfile

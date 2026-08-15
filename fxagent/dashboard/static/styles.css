@@ -1,0 +1,384 @@
+/*
+  Readable rather than pretty. Dark because the chart is, monospace because almost everything
+  on this page is a number that should line up with the number under it.
+
+  Colours are stated once here and once in `chart.py` — the Python side owns the series and
+  marker colours because it owns the series, and this file owns the chrome. Where the two must
+  agree (the strategy colours in the legend) the value comes down in the payload rather than
+  being restated in CSS.
+*/
+
+:root {
+  --bg: #14161a;
+  --panel: #1a1d23;
+  --panel-2: #20242b;
+  --line: #2b3038;
+  --text: #d8dce3;
+  --muted: #8a909b;
+  --dim: #666c77;
+  --long: #26a69a;
+  --short: #ef5350;
+  --warn: #e0a03c;
+  --ok: #4c9f70;
+  --bad: #d1544f;
+
+  --tokyo: rgba(120, 160, 220, 0.10);
+  --london: rgba(230, 170, 80, 0.10);
+  --newyork: rgba(150, 120, 210, 0.10);
+  --overlap: rgba(230, 120, 120, 0.10);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- header ------------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.title {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font: inherit;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.meta {
+  color: var(--dim);
+}
+
+.status {
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+}
+.status--live {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.status--connecting {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.status--down {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.readonly {
+  padding: 2px 8px;
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  border-radius: 3px;
+  letter-spacing: 0.08em;
+}
+
+/* --- panes -------------------------------------------------------------- */
+
+main {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pane--chart {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+
+.pane--feed {
+  flex: 0 0 clamp(360px, 32vw, 560px);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.chart-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#chart {
+  position: absolute;
+  inset: 0;
+}
+
+#sessions {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.legend .swatch {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+
+.legend .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+
+.notes {
+  flex: 0 0 auto;
+  padding: 0 12px;
+  color: var(--warn);
+}
+.notes p {
+  margin: 6px 0;
+}
+.notes:empty {
+  display: none;
+}
+
+/* --- grant card --------------------------------------------------------- */
+
+.grant {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.grant .state {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.grant .state--ADVISORY {
+  color: var(--ok);
+}
+.grant .state--GRANTED {
+  color: var(--warn);
+}
+.grant .state--REVOKED {
+  color: var(--muted);
+}
+
+.grant .reason {
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.grant .countdown {
+  color: var(--warn);
+}
+
+/* --- feed --------------------------------------------------------------- */
+
+.feed {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 12px 40px;
+}
+
+.entry {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.entry__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.entry__time {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.badge--fired {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.badge--long {
+  color: var(--long);
+  border-color: var(--long);
+}
+.badge--short {
+  color: var(--short);
+  border-color: var(--short);
+}
+
+.reason {
+  color: var(--muted);
+  margin: 4px 0;
+}
+
+.regime {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 4px 0;
+  color: var(--muted);
+}
+.regime b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+table.votes {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0;
+}
+table.votes th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 400;
+  border-bottom: 1px solid var(--line);
+}
+table.votes td,
+table.votes th {
+  padding: 2px 6px 2px 0;
+  vertical-align: top;
+}
+tr.vote--gated td,
+tr.vote--silent td {
+  color: var(--dim);
+}
+td.dir--LONG {
+  color: var(--long);
+}
+td.dir--SHORT {
+  color: var(--short);
+}
+
+.section {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-left: 2px solid var(--line);
+}
+.section h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  font-weight: 600;
+}
+.section p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.section .provenance {
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.section--absent {
+  color: var(--dim);
+  border-left-color: var(--dim);
+}
+.section--discarded {
+  border-left-color: var(--bad);
+  color: var(--bad);
+}
+.section--pattern {
+  border-left-color: var(--warn);
+}
+
+.context-only {
+  color: var(--warn);
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.advisory-only {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+table.analogues {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.analogues th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 400;
+}
+table.analogues td,
+table.analogues th {
+  padding: 1px 6px 1px 0;
+}
+
+.empty {
+  color: var(--dim);
+  padding: 20px 0;
+}

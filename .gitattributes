@@ -8,3 +8,9 @@
 *.sh text eol=lf
 *.sql text eol=lf
 .github/**/*.yml text eol=lf
+
+# The vendored charting library is checked against a pinned SHA256 (scripts/
+# vendor_lightweight_charts.py, and tests/dashboard/test_static.py). `* text=auto` above would
+# rewrite its line endings on a Windows checkout, changing every line and therefore the hash —
+# so the file that is verified byte for byte is stored and checked out byte for byte.
+fxagent/dashboard/static/vendor/** binary

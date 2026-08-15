@@ -51,7 +51,7 @@ from fxagent.strategies.base import (
     bars_to_frame,
 )
 
-__all__ = ["SessionBreakout"]
+__all__ = ["ASIAN_HOURS", "SessionBreakout", "asian_range"]
 
 #: Asian range is measured from bars OPENING in [00:00, 07:00) UTC, i.e. hours 0-6.
 #:
@@ -75,6 +75,24 @@ TIMEFRAME = "H1"
 
 def _bars_on(bars: BarSeries, day: date) -> list[Bar]:
     return [bar for bar in bars.bars if bar.timestamp.date() == day]
+
+
+def asian_range(bars: BarSeries, day: date) -> tuple[float, float] | None:
+    """High and low of `day`'s 00:00-07:00 UTC bars, or None if any of those hours is missing.
+
+    Module-level rather than a private method because the dashboard draws this range on the
+    chart, and a second implementation there would be a second definition of the level this
+    strategy actually breaks out of — drawn box and traded box agreeing until one of them was
+    tuned. Same failure the breakout window had against the router, so it is refused the same
+    way: one function, two callers.
+
+    An incomplete day returns None rather than a range measured from the hours that did
+    arrive. A partial range is narrower than the real one, so it manufactures breakouts.
+    """
+    session = [bar for bar in _bars_on(bars, day) if bar.timestamp.hour in ASIAN_HOURS]
+    if {bar.timestamp.hour for bar in session} != set(ASIAN_HOURS):
+        return None
+    return max(bar.high for bar in session), min(bar.low for bar in session)
 
 
 class SessionBreakout(Strategy):
@@ -115,7 +133,7 @@ class SessionBreakout(Strategy):
         if not self._window.permits(last.timestamp):
             return None
 
-        session_range = self._asian_range(bars, last.timestamp.date())
+        session_range = asian_range(bars, last.timestamp.date())
         if session_range is None:
             return None
         range_high, range_low = session_range
@@ -170,13 +188,6 @@ class SessionBreakout(Strategy):
                 "breakout_session": str(self._window.session),
             },
         )
-
-    def _asian_range(self, bars: BarSeries, day: date) -> tuple[float, float] | None:
-        """High and low of the day's 00:00-07:00 UTC bars, or None if any hour is missing."""
-        session = [bar for bar in _bars_on(bars, day) if bar.timestamp.hour in ASIAN_HOURS]
-        if {bar.timestamp.hour for bar in session} != set(ASIAN_HOURS):
-            return None
-        return max(bar.high for bar in session), min(bar.low for bar in session)
 
     def _break_direction(
         self, close: float, range_high: float, range_low: float

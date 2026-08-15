@@ -202,6 +202,35 @@ class TradeRepository(Repository):
         result = await self._session.execute(statement)
         return [TradeRecord.from_row(row) for row in result]
 
+    async def open_during(
+        self, *, start: datetime, end: datetime, symbol: str | None = None
+    ) -> list[TradeRecord]:
+        """Trades that held a position at any point inside [start, end], oldest entry first.
+
+        Distinct from `labels_overlapping`, which asks about the *label* span for purging a
+        training fold. This asks about the position itself, which is what a chart draws: a
+        trade entered before the visible window and still open belongs on it, and one that
+        entered and exited inside it belongs on it, but a trade that closed before the window
+        opened does not — its entry, stop and target lines would hang in empty space.
+        """
+        first = require_utc(start, "start")
+        last = require_utc(end, "end")
+        if last < first:
+            raise ValueError(f"end {last} is before start {first}")
+
+        statement = (
+            select(trades)
+            .where(
+                trades.c.entry_time_utc <= last,
+                or_(trades.c.exit_time_utc.is_(None), trades.c.exit_time_utc >= first),
+            )
+            .order_by(trades.c.entry_time_utc.asc())
+        )
+        if symbol is not None:
+            statement = statement.where(trades.c.symbol == symbol)
+        result = await self._session.execute(statement)
+        return [TradeRecord.from_row(row) for row in result]
+
     async def closed_trades(
         self, *, symbol: str | None = None, mode: str | None = None, limit: int = 1000
     ) -> list[TradeRecord]:

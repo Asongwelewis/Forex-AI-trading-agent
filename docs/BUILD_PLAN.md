@@ -422,6 +422,15 @@ re-run. Resist the urge to search parameter space until the number looks good.
 **Goal:** see what the agent is thinking, and approve trades from your phone.
 **Time:** 90 min
 
+> **The dashboard part of this is superseded — see [ADR-004](ADR-004-dashboard.md).** It was
+> built as FastAPI plus Lightweight Charts rather than Streamlit, because the card asked for a
+> candlestick chart of our own bars with session shading and per-signal markers, which Streamlit
+> cannot draw. The journal was superseded earlier too: it is Supabase Postgres, not SQLite
+> ([ADR-001](ADR-001-store.md)), because three services cannot share a file.
+>
+> The Telegram approval flow is **not** built and does not belong in the dashboard: the panel is
+> read-only, and an unauthenticated LAN page is not an approval channel.
+
 ```
 Create branch phase/08-journal-and-alerts.
 

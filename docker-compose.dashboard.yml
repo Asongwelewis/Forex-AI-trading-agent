@@ -1,0 +1,41 @@
+# The dashboard, on its own.
+#
+#   docker compose -f docker-compose.dashboard.yml up -d --build
+#
+# Named like docker-compose.test.yml rather than being a plain `docker-compose.yml`, because
+# this is not "the system" — the collector and the analyst run on GitHub Actions cron
+# (ADR-002) and have no container. A bare compose file at the root would imply otherwise.
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fxagent-dashboard:local
+    container_name: fxagent-dashboard
+
+    environment:
+      # The one thing it genuinely needs. Refuses to start without it, naming it.
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:?set SUPABASE_DB_URL (the Session pooler URL)}
+      # How often a *watched* view is rebuilt server-side. Nothing is pushed unless it changed,
+      # so this is the latency on a new bar appearing, not a message rate.
+      FX_DASHBOARD_REFRESH_SECONDS: ${FX_DASHBOARD_REFRESH_SECONDS:-15}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+    ports:
+      # Bound on every interface on purpose: the point is to reach it from another machine.
+      # There is no authentication, and the mitigation is that the service has no route that
+      # can change anything (tests/dashboard/test_app.py asserts it). On a public host, put it
+      # behind the firewall or a reverse proxy that does authenticate — do not add a login here
+      # and call the problem solved.
+      - "${FX_DASHBOARD_PORT:-8080}:8080"
+
+    # It writes nothing and holds no state worth losing, so a restart costs a page reload.
+    restart: unless-stopped
+
+    # Defence in depth for a process that is meant to be read-only anyway.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp

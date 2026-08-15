@@ -18,6 +18,7 @@ import fxagent.indicators as indicators
 from fxagent.indicators import (
     adx,
     atr,
+    bollinger_bands,
     ema,
     rolling_percentile,
     rolling_zscore,
@@ -27,9 +28,17 @@ from fxagent.indicators import (
 PERIOD = 5
 
 #: Every public indicator, bound to the same period so warm-up lengths are comparable.
+#:
+#: An indicator returning several aligned series gets **one entry per series**, keyed
+#: `name.band`. Registering a representative band instead would leave the other two
+#: unchecked, and the look-ahead promise is not a property of a function — it is a property
+#: of every number that function emits.
 INDICATORS: dict[str, Callable[[pd.DataFrame], pd.Series]] = {
     "adx": lambda f: adx(f["high"], f["low"], f["close"], PERIOD),
     "atr": lambda f: atr(f["high"], f["low"], f["close"], PERIOD),
+    "bollinger_bands.upper": lambda f: bollinger_bands(f["close"], PERIOD).upper,
+    "bollinger_bands.middle": lambda f: bollinger_bands(f["close"], PERIOD).middle,
+    "bollinger_bands.lower": lambda f: bollinger_bands(f["close"], PERIOD).lower,
     "ema": lambda f: ema(f["close"], PERIOD),
     "rolling_percentile": lambda f: rolling_percentile(f["close"], PERIOD),
     "rolling_zscore": lambda f: rolling_zscore(f["close"], PERIOD),
@@ -40,6 +49,9 @@ INDICATORS: dict[str, Callable[[pd.DataFrame], pd.Series]] = {
 FIRST_VALID: dict[str, int] = {
     "adx": 2 * PERIOD - 1,  # `period` bars to seed DI, then `period` DX values to average
     "atr": PERIOD,  # TR[0] is undefined, so the seed covers TR[1..period]
+    "bollinger_bands.upper": PERIOD - 1,
+    "bollinger_bands.middle": PERIOD - 1,
+    "bollinger_bands.lower": PERIOD - 1,
     "ema": PERIOD - 1,
     "rolling_percentile": PERIOD - 1,
     "rolling_zscore": PERIOD - 1,
@@ -50,10 +62,16 @@ FIRST_VALID: dict[str, int] = {
 PERIODIC: dict[str, Callable[[pd.DataFrame, int], pd.Series]] = {
     "adx": lambda f, p: adx(f["high"], f["low"], f["close"], p),
     "atr": lambda f, p: atr(f["high"], f["low"], f["close"], p),
+    "bollinger_bands": lambda f, p: bollinger_bands(f["close"], p).middle,
     "ema": lambda f, p: ema(f["close"], p),
     "rolling_percentile": lambda f, p: rolling_percentile(f["close"], p),
     "rolling_zscore": lambda f, p: rolling_zscore(f["close"], p),
 }
+
+
+def _public_name(registry_key: str) -> str:
+    """`bollinger_bands.upper` -> `bollinger_bands`; every other key is already public."""
+    return registry_key.split(".", 1)[0]
 
 
 def ohlc(rows: int, *, seed: int = 20260810) -> pd.DataFrame:
@@ -75,7 +93,7 @@ def ohlc(rows: int, *, seed: int = 20260810) -> pd.DataFrame:
 
 
 def test_every_public_indicator_is_covered() -> None:
-    assert set(INDICATORS) == set(indicators.__all__)
+    assert {_public_name(key) for key in INDICATORS} == set(indicators.__all__)
 
 
 # --- 1. warm-up is NaN, and the series is never truncated ----------------------

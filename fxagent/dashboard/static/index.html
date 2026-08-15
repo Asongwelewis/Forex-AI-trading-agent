@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  The instrument panel. Two panes: our bars on the left, the agent's reasoning on the right.
+
+  No build step, no framework, no CDN. Everything this page loads comes from this container,
+  which is the only way it still renders when the network is the thing being debugged.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FX regime agent — instrument panel</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="title">FX regime agent</span>
+
+      <label class="control">
+        symbol
+        <select id="symbol" aria-label="symbol"></select>
+      </label>
+
+      <label class="control">
+        timeframe
+        <select id="timeframe" aria-label="timeframe"></select>
+      </label>
+
+      <span class="spacer"></span>
+
+      <span id="source" class="meta" title="which provider's bars are drawn"></span>
+      <span id="generated" class="meta" title="when this snapshot was built"></span>
+      <span id="status" class="status status--connecting">connecting</span>
+      <span class="readonly" title="This process has no route that can change anything.">
+        READ ONLY
+      </span>
+    </header>
+
+    <main>
+      <section class="pane pane--chart">
+        <div id="legend" class="legend"></div>
+        <div class="chart-wrap">
+          <div id="chart"></div>
+          <!-- Session shading is painted here, over the chart, because Lightweight Charts has
+               no background-band API. Bands are positioned from bar indices, never from wall
+               clock arithmetic, so daylight saving is the server's problem and not this
+               file's. -->
+          <canvas id="sessions"></canvas>
+        </div>
+        <div id="chart-notes" class="notes"></div>
+      </section>
+
+      <aside class="pane pane--feed">
+        <div id="grant" class="grant"></div>
+        <div id="feed-notes" class="notes"></div>
+        <div id="feed" class="feed"></div>
+      </aside>
+    </main>
+
+    <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,9 +15,20 @@ from fxagent.adapters.base import TIMEFRAMES, Bar, BarSeries
 from fxagent.store.repositories.base import Repository, require_utc
 from fxagent.store.schema import bars
 
-__all__ = ["BarRepository"]
+__all__ = ["BarRepository", "SeriesSummary"]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SeriesSummary:
+    """One stored series and its extent. A bar's identity includes its source, so this does too."""
+
+    symbol: str
+    timeframe: str
+    source: str
+    bars: int
+    latest: datetime | None
 
 
 class BarRepository(Repository):
@@ -182,6 +194,40 @@ class BarRepository(Repository):
             statement = statement.where(bars.c.source == source)
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
+
+    async def available_series(self) -> Sequence[SeriesSummary]:
+        """Every (symbol, timeframe, source) that has bars, with how many and how recent.
+
+        The dashboard's switchers are built from this rather than from a configured list, so an
+        option is offered only when there are bars behind it. A switcher listing a pair the
+        collector has never fetched produces an empty chart that looks like a rendering bug and
+        is really an empty table.
+
+        The count and the latest timestamp come back in the same pass because they are what
+        makes the option informative: "EURUSD H1, 4,312 bars, latest 08:00Z" says the series is
+        live, and the same line with yesterday's timestamp says the collector has stopped.
+        """
+        result = await self._session.execute(
+            select(
+                bars.c.symbol,
+                bars.c.timeframe,
+                bars.c.source,
+                func.count().label("bars"),
+                func.max(bars.c.ts_utc).label("latest"),
+            )
+            .group_by(bars.c.symbol, bars.c.timeframe, bars.c.source)
+            .order_by(bars.c.symbol, bars.c.timeframe, bars.c.source)
+        )
+        return [
+            SeriesSummary(
+                symbol=row.symbol,
+                timeframe=row.timeframe,
+                source=row.source,
+                bars=int(row.bars),
+                latest=row.latest,
+            )
+            for row in result
+        ]
 
     async def sources_for(self, symbol: str) -> Sequence[str]:
         """Which sources have data for this symbol."""

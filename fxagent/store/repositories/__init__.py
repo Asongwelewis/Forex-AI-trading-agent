@@ -11,7 +11,7 @@ read, and neither offers an unfiltered alternative.
 
 from __future__ import annotations
 
-from fxagent.store.repositories.bars import BarRepository
+from fxagent.store.repositories.bars import BarRepository, SeriesSummary
 from fxagent.store.repositories.base import Repository, require_utc
 from fxagent.store.repositories.cot import CotReportRecord, CotRepository
 from fxagent.store.repositories.evaluations import EvaluationRecord, EvaluationRepository
@@ -38,6 +38,7 @@ __all__ = [
     "ObservationRecord",
     "ObservationRepository",
     "Repository",
+    "SeriesSummary",
     "TradeRecord",
     "TradeRepository",
     "WindowRecord",

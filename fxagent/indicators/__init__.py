@@ -14,11 +14,16 @@ from __future__ import annotations
 
 from fxagent.indicators.statistics import rolling_percentile, rolling_zscore
 from fxagent.indicators.trend import adx, ema
-from fxagent.indicators.volatility import atr, true_range
+from fxagent.indicators.volatility import atr, bollinger_bands, true_range
 
+#: Functions only. `tests/indicators/test_contracts.py` asserts this list and its registry of
+#: checked indicators are the same set, so an indicator cannot be added without being checked —
+#: which means constants and return types stay in the module that owns them rather than being
+#: re-exported here and quietly weakening that equality into "mostly indicators".
 __all__ = [
     "adx",
     "atr",
+    "bollinger_bands",
     "ema",
     "rolling_percentile",
     "rolling_zscore",

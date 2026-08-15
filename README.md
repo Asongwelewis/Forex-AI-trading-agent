@@ -29,6 +29,45 @@ and names the one that is missing.
 `GEMINI_API_KEY`, `GROQ_API_KEY` and `NVIDIA_API_KEY` are optional: with none of them set, the
 deterministic template explanation is used and the pass completes normally.
 
+## The dashboard
+
+The one long-lived process, and the only thing here with a container. It is a **read-only
+window** on the store: our bars with our own overlays on the left, one entry per consensus
+evaluation — including the ones that fired nothing — on the right. See
+[ADR-004](docs/ADR-004-dashboard.md).
+
+```bash
+uv sync --extra dashboard
+uv run python -m fxagent.dashboard            # http://localhost:8080
+
+docker compose -f docker-compose.dashboard.yml up -d --build
+```
+
+It needs `SUPABASE_DB_URL` and nothing else. `FX_DASHBOARD_PORT` (8080) and
+`FX_DASHBOARD_REFRESH_SECONDS` (15) are the only other knobs.
+
+| Route | |
+|---|---|
+| `/` | the panel |
+| `/ws?symbol=EURUSD&timeframe=H1` | a snapshot on connect, then one per change |
+| `/api/snapshot?symbol=EURUSD` | the same object, for curl |
+| `/api/options` | the (symbol, timeframe, source) triples that have bars |
+| `/api/health` | store reachable, chart library present, who is watching what |
+
+**It binds `0.0.0.0` and has no authentication.** That is deliberate and only safe because
+every route is a GET and nothing in `fxagent/dashboard/` can write — asserted by
+`tests/dashboard/test_app.py::test_no_route_can_change_anything`, which is the actual security
+boundary. On a public host, put it behind a firewall or an authenticating proxy. Do not add a
+write route without adding authentication in the same change.
+
+The charting library is vendored (Lightweight Charts v4.2.3, Apache 2.0) and checked against a
+pinned SHA-256. To refresh it after changing the pin:
+
+```bash
+uv run python scripts/vendor_lightweight_charts.py          # fetch
+uv run python scripts/vendor_lightweight_charts.py --check  # verify what is committed
+```
+
 ### Local development
 
 ```bash

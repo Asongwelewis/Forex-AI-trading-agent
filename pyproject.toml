@@ -36,12 +36,30 @@ dependencies = [
 #   uv sync --extra mt5
 mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 
+# The dashboard is the one long-lived process in the system, and the only one that needs a web
+# server. Kept out of the base dependency set so the hourly Actions job — which installs with
+# `--no-dev` and no extras — does not carry uvicorn and its C extensions for a pass that never
+# serves a request. Install with `uv sync --extra dashboard`.
+#
+# uvicorn[standard] pulls uvloop, httptools and websockets. All three publish aarch64 wheels,
+# which matters: the container is meant to run on Oracle's ARM instances, where a missing wheel
+# means a compiler in the image rather than a failure.
+dashboard = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "ruff>=0.6",
+    # The dashboard suite exercises the real routes and the real socket through Starlette's
+    # TestClient, so the extra is a dev dependency too — a UI whose behaviour is only ever
+    # eyeballed is a UI with no tests.
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [build-system]
