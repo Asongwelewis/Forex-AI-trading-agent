@@ -1,8 +1,8 @@
 /*
  * The panel's front end. Vanilla, deliberately.
  *
- * It does four things: keep one WebSocket open, draw the price series in whichever form is
- * selected, paint the session bands, and render the feed. It computes nothing. Every price,
+ * It does four things: stay current with the server, draw the price series in whichever form
+ * is selected, paint the session bands, and render the feed. It computes nothing. Every price,
  * level, session boundary and marker is calculated on the server from the same code the
  * strategies read — this file would be the easiest place in the system to introduce a second,
  * subtly different definition of "the London session" or "the 20-period EMA", so it is not
@@ -54,6 +54,11 @@ const PALETTE = {
 
 const state = {
   socket: null,
+  transport: "ws",
+  pollSeconds: 15,
+  pollTimer: null,
+  revision: null,
+  socketFailures: 0,
   snapshot: null,
   chart: null,
   priceSeries: null,
@@ -943,25 +948,48 @@ function applySnapshot(snapshot) {
   applyFeed(snapshot.feed);
 }
 
+/**
+ * Stay current, by whichever means this deployment supports.
+ *
+ * The server answers that at `/api/config` rather than the client guessing, because a client
+ * cannot tell a host that refuses WebSocket upgrades from one that is briefly down, and those
+ * two want opposite responses. See `dashboard/transport.py`.
+ */
 function connect() {
+  stopPolling();
   if (state.socket) {
     state.socket.onclose = null;
     state.socket.close();
+    state.socket = null;
   }
 
   const view = currentView();
   if (!view.symbol) return;
 
   state.seenEntries.clear();
+  state.revision = null;
 
+  if (state.transport === "poll") startPolling(view);
+  else connectSocket(view);
+}
+
+function viewQuery(view) {
+  return (
+    `symbol=${encodeURIComponent(view.symbol)}` +
+    `&timeframe=${encodeURIComponent(view.timeframe)}`
+  );
+}
+
+// --- socket ---------------------------------------------------------------------
+
+function connectSocket(view) {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const url =
-    `${protocol}://${location.host}/ws` +
-    `?symbol=${encodeURIComponent(view.symbol)}&timeframe=${encodeURIComponent(view.timeframe)}`;
+  const url = `${protocol}://${location.host}/ws?${viewQuery(view)}`;
 
   setStatus("connecting", "connecting");
   const socket = new WebSocket(url);
   state.socket = socket;
+  let delivered = false;
 
   socket.onopen = () => {
     state.reconnectDelay = 1000;
@@ -971,6 +999,8 @@ function connect() {
   socket.onmessage = (event) => {
     const envelope = JSON.parse(event.data);
     if (envelope.type === "snapshot" && envelope.snapshot) {
+      delivered = true;
+      state.socketFailures = 0;
       applySnapshot(envelope.snapshot);
       setStatus("live", "live");
     } else if (envelope.type === "error") {
@@ -980,6 +1010,19 @@ function connect() {
   };
 
   socket.onclose = () => {
+    // A socket that closes without ever delivering anything is not a flaky connection: it is a
+    // host that will not carry one — a proxy stripping the upgrade, or a serverless runtime
+    // that never could. Twice is enough to stop asking and fall back to something that works.
+    if (!delivered && ++state.socketFailures >= 2) {
+      renderNotes(document.getElementById("chart-notes"), [
+        "This host is not carrying the WebSocket, so the panel has fallen back to polling " +
+          `every ${state.pollSeconds}s. Updates will lag by up to that long.`,
+      ]);
+      state.transport = "poll";
+      connect();
+      return;
+    }
+
     // The server pushes only on change, so silence is normal and a closed socket is not.
     // Back off to 15s so a restarted container is picked up without hammering it.
     setStatus("reconnecting", "down");
@@ -988,6 +1031,64 @@ function connect() {
   };
 
   socket.onerror = () => setStatus("socket error", "down");
+}
+
+// --- polling --------------------------------------------------------------------
+
+/* Bumped on every stop, so a request already in flight for the previous view lands, finds
+   itself stale, and neither renders nor arms another timer. */
+let pollGeneration = 0;
+
+function stopPolling() {
+  pollGeneration += 1;
+  if (state.pollTimer !== null) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+/**
+ * Conditional polling: ask only for what changed.
+ *
+ * The revision the client is holding goes up with the request, and an unchanged view comes
+ * back as `304` with no body. A quiet market therefore costs an empty round trip per interval
+ * rather than 150KB of identical JSON.
+ */
+function startPolling(view) {
+  const query = viewQuery(view);
+  const generation = pollGeneration;
+
+  const tick = async () => {
+    if (generation !== pollGeneration) return;
+    try {
+      const since = state.revision ? `&since=${encodeURIComponent(state.revision)}` : "";
+      const response = await fetch(`/api/snapshot?${query}${since}`, { cache: "no-store" });
+
+      if (response.status === 304) {
+        setStatus("polling", "live");
+      } else if (response.ok) {
+        const snapshot = await response.json();
+        state.revision = snapshot.revision;
+        applySnapshot(snapshot);
+        setStatus("polling", "live");
+      } else {
+        const detail = await response.json().catch(() => ({}));
+        setStatus("store error", "down");
+        renderNotes(document.getElementById("chart-notes"), [
+          detail.error || `The server answered ${response.status}.`,
+        ]);
+      }
+    } catch (error) {
+      setStatus("cannot reach the server", "down");
+      renderNotes(document.getElementById("chart-notes"), [String(error)]);
+    }
+    if (generation === pollGeneration) {
+      state.pollTimer = setTimeout(tick, state.pollSeconds * 1000);
+    }
+  };
+
+  setStatus("connecting", "connecting");
+  tick();
 }
 
 function populateSwitchers(options) {
@@ -1082,6 +1183,10 @@ async function start() {
   }
 
   try {
+    const config = await fetch("/api/config").then((r) => r.json());
+    state.transport = config.transport === "poll" ? "poll" : "ws";
+    state.pollSeconds = Number(config.poll_seconds) || 15;
+
     const response = await fetch("/api/options");
     const options = await response.json();
     if (!Array.isArray(options) || options.length === 0) {

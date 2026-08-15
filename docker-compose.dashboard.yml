@@ -20,14 +20,16 @@ services:
       # How often a *watched* view is rebuilt server-side. Nothing is pushed unless it changed,
       # so this is the latency on a new bar appearing, not a message rate.
       FX_DASHBOARD_REFRESH_SECONDS: ${FX_DASHBOARD_REFRESH_SECONDS:-15}
+      # Empty means open, which is the right default for a container on a home LAN. Set it to
+      # put HTTP Basic in front of the panel wherever that is not the whole story.
+      FX_DASHBOARD_PASSWORD: ${FX_DASHBOARD_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
     ports:
       # Bound on every interface on purpose: the point is to reach it from another machine.
-      # There is no authentication, and the mitigation is that the service has no route that
-      # can change anything (tests/dashboard/test_app.py asserts it). On a public host, put it
-      # behind the firewall or a reverse proxy that does authenticate — do not add a login here
-      # and call the problem solved.
+      # The service has no route that can change anything (tests/dashboard/test_app.py asserts
+      # it), and FX_DASHBOARD_PASSWORD above adds a shared password on top. On a public host,
+      # set that password — or keep the port off the public internet entirely.
       - "${FX_DASHBOARD_PORT:-8080}:8080"
 
     # It writes nothing and holds no state worth losing, so a restart costs a page reload.

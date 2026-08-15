@@ -1,0 +1,24 @@
+# Vercel bundles the whole repo unless told otherwise, and the Python bundle has a hard size
+# limit that pandas and numpy have already spent most of. Only `api/`, `fxagent/` and
+# `requirements.txt` are needed to serve the panel.
+
+.github
+.venv
+tests
+docs
+scripts
+uv.lock
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.pyc
+
+# Never. Secrets reach the function through Vercel's environment variables, never through the
+# deployment bundle — anything here is readable by anyone who can inspect the build.
+.env
+*.key
+*.pem

@@ -1,11 +1,19 @@
-"""The FastAPI app: four read routes, one socket, one page.
+"""The FastAPI app: five read routes, one socket, one page.
 
 **Every route is a GET.** There is no POST, PUT, PATCH or DELETE anywhere in this file, and
 `tests/dashboard/test_app.py` asserts that by inspecting the route table rather than by trusting
 this sentence. The reason is CLAUDE.md hard rule 1 and the shape of the deployment: this process
 is meant to be reachable across a network, and the only safe thing to expose that way is a
 window. Approving or placing a trade is a different feature with an authenticated channel
-(Telegram, with a pinned chat id) and does not belong behind an unauthenticated LAN page.
+(Telegram, with a pinned chat id) and does not belong behind a web page at all.
+
+That the password gate is *middleware* rather than a login form is the same rule holding: a
+form would need a POST, and the first mutating route on this service is the one that ends the
+argument above. See `auth.py`.
+
+Two transports live here, and which one the client uses is the server's answer at `/api/config`,
+not a guess. The socket is the design; polling is what a serverless host can actually run. See
+`transport.py` for what the second one costs.
 
 The page itself is served from `static/`, vendored and self-hosted — no CDN, no external font,
 no analytics. A dashboard that cannot render without reaching the internet is a dashboard that
@@ -21,10 +29,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from fxagent.dashboard.auth import PasswordGate, configured_password, is_authenticated
 from fxagent.dashboard.chart import ChartConfig
 from fxagent.dashboard.grant import AdvisoryOnly, GrantReader
 from fxagent.dashboard.live import DEFAULT_REFRESH_SECONDS, LiveHub, Subscriber
@@ -36,6 +45,7 @@ from fxagent.dashboard.source import (
     StoreSource,
     ViewRequest,
 )
+from fxagent.dashboard.transport import Transport, configured_transport
 from fxagent.dashboard.vendored import path as vendored_chart_library
 
 __all__ = ["STATIC_DIR", "VENDOR_SCRIPT", "create_app"]
@@ -54,12 +64,18 @@ def create_app(
     grants: GrantReader | None = None,
     refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
     chart_config: ChartConfig | None = None,
+    transport: Transport | None = None,
+    password: str | None = None,
 ) -> FastAPI:
     """Build the app. Everything it depends on is injectable, which is why it is testable.
 
     With no `source`, one is built from the environment — `SUPABASE_DB_URL`, through the same
     `Database` the collector uses. The tests pass a stub instead and never open a socket to
     anything.
+
+    `transport` and `password` default to the environment (`FX_DASHBOARD_TRANSPORT`,
+    `FX_DASHBOARD_PASSWORD`) so a deployment configures them without a code change, and are
+    arguments so a test can have both without touching `os.environ`.
     """
     database = None
     if source is None:
@@ -67,6 +83,9 @@ def create_app(
 
         database = Database.from_env()
         source = StoreSource(database)
+
+    mode = transport if transport is not None else configured_transport()
+    secret = password if password is not None else configured_password()
 
     hub = LiveHub(
         source,
@@ -77,7 +96,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await hub.start()
+        # Only the socket has subscribers to push to, and on a serverless host the loop would
+        # be started on every cold start and killed with the invocation. See transport.py.
+        if mode.needs_refresh_loop:
+            await hub.start()
         try:
             yield
         finally:
@@ -96,6 +118,16 @@ def create_app(
     )
     app.state.hub = hub
     app.state.source = source
+    app.state.transport = mode
+
+    if secret:
+        app.add_middleware(PasswordGate, password=secret)
+    else:
+        logger.warning(
+            "%s is not set, so the panel is open to anyone who can reach it. That is the right "
+            "default on localhost and on a private network, and the wrong one on a public host.",
+            "FX_DASHBOARD_PASSWORD",
+        )
 
     def _request(
         symbol: str,
@@ -116,13 +148,31 @@ def create_app(
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/config")
+    async def config() -> dict[str, Any]:
+        """What the client needs to know before it connects. Read once, on load.
+
+        The transport is the server's answer rather than the client's guess, because the client
+        cannot tell a host that refuses WebSocket upgrades from one that is briefly down — and
+        the two want opposite responses.
+        """
+        return {
+            "transport": str(mode),
+            "poll_seconds": hub.refresh_seconds,
+            "read_only": True,
+        }
+
     @app.get("/api/health")
-    async def health() -> JSONResponse:
+    async def health(request: Request) -> JSONResponse:
         """Is the store readable, is the chart library present, who is watching what.
 
         Reports `degraded` rather than raising when the store cannot be read: the page is still
         useful with a stale snapshot on it, and a health check that 500s tells a monitor less
         than one that answers with the reason.
+
+        Reachable without the password so an uptime check still works — but an unauthenticated
+        caller gets liveness only. The full report names the store's error, and a connection
+        error names the host.
         """
         detail: dict[str, Any] = {
             "status": "ok",
@@ -130,6 +180,7 @@ def create_app(
             "rooms": hub.rooms,
             "watchers": hub.watchers,
             "refresh_seconds": hub.refresh_seconds,
+            "transport": str(mode),
             "chart_library": "present" if VENDOR_SCRIPT.exists() else "missing",
         }
         try:
@@ -144,7 +195,10 @@ def create_app(
                 "run `uv run python scripts/vendor_lightweight_charts.py`"
             )
 
-        return JSONResponse(detail, status_code=200 if detail["status"] == "ok" else 503)
+        status = 200 if detail["status"] == "ok" else 503
+        if not is_authenticated(request):
+            detail = {"status": detail["status"], "read_only": True}
+        return JSONResponse(detail, status_code=status)
 
     @app.get("/api/options")
     async def options() -> Any:
@@ -162,18 +216,32 @@ def create_app(
         bar_source: str | None = Query(None, alias="source"),
         bars: int = Query(DEFAULT_BAR_COUNT),
         feed_limit: int = Query(DEFAULT_FEED_LIMIT),
+        since: str | None = Query(
+            None,
+            description="A revision the caller already holds. Answers 304 when it is current.",
+        ),
     ) -> Any:
-        """One complete view. The socket sends this same object; this route is for curl.
+        """One complete view. The socket sends this same object; polling clients read this one.
+
+        **`since` is what makes polling affordable.** The view is rebuilt either way — that is
+        the only way to know whether it moved — but when the content hash matches what the
+        caller already has, the answer is `304 Not Modified` with no body. A quiet market then
+        costs an empty round trip per interval instead of 150KB of unchanged JSON.
 
         An unreadable store is a 503 naming the reason, not a 500 with a traceback. The
         distinction is the difference between "the panel is broken" and "the panel is fine and
         the database is not", which is the first thing anyone looking at this needs to know.
         """
         try:
-            return await hub.snapshot(_request(symbol, timeframe, bar_source, bars, feed_limit))
+            built = await hub.snapshot(_request(symbol, timeframe, bar_source, bars, feed_limit))
         except Exception as error:  # noqa: BLE001 - the reason is the useful part
             logger.exception("could not build a snapshot for %s %s", symbol, timeframe)
             return _unavailable(error)
+
+        if since is not None and since == built.revision:
+            # 304 carries no body by definition, which is the point: the ETag is the answer.
+            return Response(status_code=304, headers={"ETag": f'"{built.revision}"'})
+        return JSONResponse(built.model_dump(mode="json"), headers={"ETag": f'"{built.revision}"'})
 
     @app.websocket("/ws")
     async def live(

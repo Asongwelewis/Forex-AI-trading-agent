@@ -59,11 +59,34 @@ collapses to give the chart the full width. Every choice persists in `localStora
 | `/api/options` | the (symbol, timeframe, source) triples that have bars |
 | `/api/health` | store reachable, chart library present, who is watching what |
 
-**It binds `0.0.0.0` and has no authentication.** That is deliberate and only safe because
-every route is a GET and nothing in `fxagent/dashboard/` can write — asserted by
-`tests/dashboard/test_app.py::test_no_route_can_change_anything`, which is the actual security
-boundary. On a public host, put it behind a firewall or an authenticating proxy. Do not add a
-write route without adding authentication in the same change.
+**It binds `0.0.0.0`.** Every route is a GET and nothing in `fxagent/dashboard/` can write —
+asserted by `tests/dashboard/test_app.py::test_no_route_can_change_anything`, which is the
+actual security boundary. Do not add a write route without adding authentication in the same
+change.
+
+Set `FX_DASHBOARD_PASSWORD` to put a shared password in front of it (HTTP Basic; any username).
+Unset means open, which is right on localhost and on a home LAN and wrong on a public host —
+the startup log says so either way.
+
+### Deploying to Vercel
+
+`api/index.py` + `vercel.json` deploy the panel as one serverless function. It works, and it is
+**degraded on purpose**: a function cannot hold a WebSocket or run the shared refresh loop, so
+the client polls conditionally instead — see [ADR-004](docs/ADR-004-dashboard.md) for what that
+costs. A host that runs a process (the container above) is still the better target.
+
+```bash
+uv run python scripts/vercel_requirements.py   # regenerate after any lockfile change
+npx vercel                                     # first deploy, or `npx vercel --prod`
+```
+
+Three project environment variables, and none of them is optional:
+
+| Variable | |
+|---|---|
+| `SUPABASE_DB_URL` | The **transaction pooler, port 6543** — not 5432. Every invocation opens its own connection; the direct port will work in testing and exhaust the allowance in use. |
+| `FX_DASHBOARD_TRANSPORT` | `poll`. Without it the client tries a WebSocket, fails twice, and falls back with a visible note. |
+| `FX_DASHBOARD_PASSWORD` | A Vercel URL is public. |
 
 The charting library is vendored (Lightweight Charts v4.2.3, Apache 2.0) and checked against a
 pinned SHA-256. To refresh it after changing the pin:

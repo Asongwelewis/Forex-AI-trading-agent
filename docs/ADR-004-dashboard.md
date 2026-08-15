@@ -145,6 +145,64 @@ The vendor directory is marked `binary` in `.gitattributes`. Without that, `* te
 rewrite the file's line endings on a Windows checkout and the pinned hash would fail on a fresh
 clone — a failure that looks like tampering and is not.
 
+## Vercel: a second, degraded transport
+
+**Amended after the fact.** The panel is deployed to Vercel, which cannot run any of the three
+things the section above describes: a function is invoked per request, cannot accept a WebSocket
+upgrade, and has nowhere for a background task to live between invocations.
+
+So there are two transports, and the server tells the client which one to use at `/api/config`
+rather than the client guessing — a browser cannot tell a host that refuses upgrades from one
+that is briefly down, and those want opposite responses. `FX_DASHBOARD_TRANSPORT=poll` selects
+polling; the default stays the socket, because that is the better design and the one every
+self-hosted deployment can run. The client also falls back on its own after two sockets close
+without delivering anything, with a visible note, so a proxy that strips the upgrade degrades
+instead of hanging.
+
+Polling is **conditional**. The client sends the revision it holds; the server rebuilds the view,
+compares the content hash, and answers `304` with no body when nothing moved. The revision doing
+that work is the same hash the socket already used to decide whether to push, so the two
+transports agree by construction — `test_the_socket_and_the_poll_agree_on_the_revision`.
+
+What this costs, written down rather than glossed:
+
+* **Latency** is the poll interval instead of "as soon as the row lands".
+* **The shared rebuild is gone.** Ten browsers on one symbol now cost ten reads instead of one.
+  Fine for a personal panel, not fine for a busy one.
+* **A database round trip per client per tick.** The transaction pooler (port 6543) is not
+  optional in this mode; `DatabaseConfig` already switches to `NullPool` and disables the
+  statement cache when it sees that port, and pointing it at 5432 will work in testing and
+  exhaust the connection allowance under any real use.
+
+That is a real regression against the design above, and it is the price of that host. The socket
+path is untouched and still the recommended one.
+
+## The password gate
+
+A Vercel URL is public, which invalidates the "nothing here to attack" argument as the *only*
+control. `FX_DASHBOARD_PASSWORD` turns on a shared-password gate; unset leaves the panel open,
+which is right on localhost and on a home LAN, and `create_app` warns at startup so an unset
+password on a public host is noisy rather than silent.
+
+**HTTP Basic, as middleware, not a login form.** A form needs a POST route, and the first
+mutating route on this service is the one that ends the argument in the section above. Basic
+adds no route at all — `test_the_gate_adds_no_route_at_all` asserts the route table is identical
+gated and open. It is a shared secret in a header over HTTPS, which is the right weight for
+"this is mine and I would rather it were not indexed"; it is not a user system, and nothing
+behind it can be changed by whoever gets in.
+
+Two details that are not decoration:
+
+* **`/api/health` stays reachable** so a container healthcheck and an uptime monitor still work,
+  but an unauthenticated caller gets `{status, read_only}` and nothing else. The full report
+  names the store's error, and a connection error names the host.
+* **A cookie exists, and has to.** Browsers do not attach cached Basic credentials to a
+  WebSocket upgrade, and the JavaScript `WebSocket` constructor cannot set headers — so Basic
+  alone would authenticate every page load and then silently fail to connect the socket. An
+  authenticated response sets a cookie carrying an HMAC of the password, which the handshake
+  accepts. Derived rather than stored, so it survives a restart with no state; one-way, so a
+  cookie read off a machine does not hand back what was typed.
+
 ## Consequences
 
 **`fastapi` and `uvicorn` are an optional extra, not a base dependency.** The hourly Actions job
