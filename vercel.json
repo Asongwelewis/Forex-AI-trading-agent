@@ -5,7 +5,6 @@
       "maxDuration": 30
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
   "headers": [
     {
       "source": "/static/vendor/(.*)",
