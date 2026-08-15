@@ -42,8 +42,8 @@ from fxagent.dashboard.source import (
     DEFAULT_BAR_COUNT,
     DEFAULT_FEED_LIMIT,
     DashboardSource,
-    StoreSource,
     ViewRequest,
+    store_or_unavailable,
 )
 from fxagent.dashboard.transport import Transport, configured_transport
 from fxagent.dashboard.vendored import path as vendored_chart_library
@@ -79,10 +79,10 @@ def create_app(
     """
     database = None
     if source is None:
-        from fxagent.store import Database  # imported late: tests need no database driver
-
-        database = Database.from_env()
-        source = StoreSource(database)
+        # An unconfigured store must not raise here. On a serverless host that turns every
+        # request into an opaque 500 with the reason in a log nobody is reading; the panel
+        # instead loads and prints the missing variable's name where the chart would be.
+        source, database = store_or_unavailable()
 
     mode = transport if transport is not None else configured_transport()
     secret = password if password is not None else configured_password()

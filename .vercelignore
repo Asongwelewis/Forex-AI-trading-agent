@@ -2,12 +2,28 @@
 # limit that pandas and numpy have already spent most of. Only `api/`, `fxagent/` and
 # `requirements.txt` are needed to serve the panel.
 
+# pyproject.toml is excluded ON PURPOSE, and this is the load-bearing line in this file.
+#
+# Vercel's Python builder prefers `uv sync` against pyproject.toml when it finds one, and
+# `fastapi` lives in the `dashboard` OPTIONAL extra — deliberately, so the hourly Actions job
+# does not install a web server for a pass that never serves a request. uv does not install
+# extras by default, so the first deploy built cleanly and then died on every request with
+# `ModuleNotFoundError: No module named 'fastapi'`.
+#
+# Hiding pyproject.toml makes the builder fall back to requirements.txt, which
+# `scripts/vercel_requirements.py` generates from uv.lock with the extra already resolved. The
+# same pins, the whole dependency set, and no second declaration to drift.
+#
+# `fxagent` is still importable: it sits at the deployment root, so `import fxagent` resolves
+# from the filesystem without the package being installed as a distribution.
+pyproject.toml
+uv.lock
+
 .github
 .venv
 tests
 docs
 scripts
-uv.lock
 docker-compose*.yml
 Dockerfile
 .dockerignore

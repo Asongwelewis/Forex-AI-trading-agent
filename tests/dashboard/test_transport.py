@@ -133,3 +133,45 @@ def test_the_socket_and_the_poll_agree_on_the_revision(source: StubSource) -> No
             over_socket = socket.receive_json()["snapshot"]["revision"]
 
     assert over_http == over_socket
+
+
+# --- an unconfigured store ----------------------------------------------------------
+
+
+def test_an_unconfigured_store_still_serves_a_page_that_says_why() -> None:
+    """A serverless deploy with no SUPABASE_DB_URL used to raise during import, so every
+    request became an opaque 500 with the reason in a log nobody was reading."""
+    from fxagent.dashboard.source import UnavailableSource
+
+    reason = "no database URL configured; set SUPABASE_DB_URL"
+    with TestClient(create_app(source=UnavailableSource(reason), transport=Transport.POLL)) as c:
+        assert c.get("/").status_code == 200
+        assert c.get("/api/config").status_code == 200
+
+        health = c.get("/api/health")
+        assert health.status_code == 503
+        assert reason in health.json()["store_error"]
+
+        snapshot = c.get("/api/snapshot", params=VIEW)
+        assert snapshot.status_code == 503
+        assert reason in snapshot.json()["error"]
+
+
+def test_a_configuration_error_falls_back_but_a_connection_error_does_not() -> None:
+    """ "Supabase is having a moment" and "you forgot a variable" send you to different places,
+    so only the second one is caught here."""
+    from fxagent.dashboard.source import UnavailableSource, store_or_unavailable
+    from fxagent.store.config import DatabaseConfigError
+
+    def unconfigured():
+        raise DatabaseConfigError("no database URL configured")
+
+    source, database = store_or_unavailable(unconfigured)
+    assert isinstance(source, UnavailableSource)
+    assert database is None
+
+    def unreachable():
+        raise OSError("connection refused")
+
+    with pytest.raises(OSError, match="connection refused"):
+        store_or_unavailable(unreachable)

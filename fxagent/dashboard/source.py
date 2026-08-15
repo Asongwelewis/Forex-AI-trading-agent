@@ -15,12 +15,14 @@ routes: it is the property that makes it safe to expose this process on a LAN, w
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from fxagent.adapters.base import BarSeries
 from fxagent.dashboard.models import SeriesOption
+from fxagent.store.config import DatabaseConfigError
 from fxagent.store.engine import Database
 from fxagent.store.repositories import (
     BarRepository,
@@ -30,7 +32,15 @@ from fxagent.store.repositories import (
     TradeRepository,
 )
 
-__all__ = ["DashboardSource", "StoreSource", "ViewData", "ViewRequest", "utc_now"]
+__all__ = [
+    "DashboardSource",
+    "StoreSource",
+    "UnavailableSource",
+    "ViewData",
+    "ViewRequest",
+    "store_or_unavailable",
+    "utc_now",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +186,52 @@ class StoreSource:
             trades=tuple(trades),
             options=options,
         )
+
+
+class UnavailableSource:
+    """A source that cannot read anything and says exactly why, on every attempt.
+
+    Stands in when the store could not even be *configured* — in practice, a deployment with no
+    `SUPABASE_DB_URL`. Without it `create_app` raises during import, which on a serverless host
+    means every request returns an opaque 500 and the reason is a traceback in a log the person
+    who just deployed is not looking at.
+
+    With it, the page loads, the transport works, and the panel prints the missing variable's
+    name where the chart would be. The failure is identical; only its diagnosability changes,
+    and that is the difference between a one-line fix and an afternoon.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    async def options(self) -> tuple[SeriesOption, ...]:
+        raise RuntimeError(self.reason)
+
+    async def load(self, request: ViewRequest) -> ViewData:
+        raise RuntimeError(self.reason)
+
+
+def store_or_unavailable(
+    build: Callable[[], Database] = Database.from_env,
+) -> tuple[DashboardSource, Database | None]:
+    """A `StoreSource` on the configured database, or an `UnavailableSource` explaining why not.
+
+    Returns the `Database` too, so a caller with a lifespan can dispose it; `None` when there
+    was nothing to build.
+
+    **Only configuration errors are caught.** A database that is configured and unreachable is
+    a different thing entirely — it is transient, the panel already degrades to a 503 naming
+    the reason, and swallowing it here would turn "Supabase is having a moment" into "you
+    forgot to set a variable", which is the wrong thing to go and check.
+    """
+    try:
+        database = build()
+    except DatabaseConfigError as error:
+        logger.error(
+            "the store is not configured, so the panel will have nothing to draw: %s", error
+        )
+        return UnavailableSource(str(error)), None
+    return StoreSource(database), database
 
 
 def _resolve_source(request: ViewRequest, options: tuple[SeriesOption, ...]) -> str | None:
