@@ -159,3 +159,54 @@ def test_malformed_url_is_rejected() -> None:
 def test_non_postgres_scheme_is_rejected() -> None:
     with pytest.raises(DatabaseConfigError, match="unsupported database scheme"):
         DatabaseConfig.from_url("mysql://u:p@example.com/db")
+
+
+# --- connection hints ---------------------------------------------------------------
+
+
+def test_a_self_signed_certificate_failure_names_the_fix() -> None:
+    """A deployment with the right host, the right pooler port and the right credentials
+    failed every request on this, sixty lines down a serverless traceback. The DSN was missing
+    `?sslmode=require`, which .env.example warns about and nobody reads while pasting a URL
+    into a hosting dashboard."""
+    from fxagent.store.config import connection_hint
+
+    error = Exception(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "self-signed certificate in certificate chain (_ssl.c:1010)"
+    )
+    hint = connection_hint(error)
+
+    assert hint is not None
+    assert "sslmode=require" in hint
+
+
+def test_an_unrecognised_failure_gets_no_invented_hint() -> None:
+    """Guessing at a cause is worse than saying nothing: it sends the reader somewhere."""
+    from fxagent.store.config import connection_hint
+
+    assert connection_hint(OSError("connection refused")) is None
+
+
+def test_a_dsn_with_no_sslmode_still_verifies_in_full() -> None:
+    """The strict default, kept on purpose even though it is what refuses Supabase's pooler.
+
+    `require` means encrypt-without-verifying. Inferring it from the hostname — "this looks
+    like Supabase, so stop checking the certificate" — would downgrade someone else's TLS on
+    their behalf, silently, to save them typing eight characters. So the default stays strict,
+    the connection fails, and `connection_hint` says which eight characters to type.
+    """
+    from fxagent.store.config import DatabaseConfig
+
+    config = DatabaseConfig.from_url(
+        "postgresql://user:pw@aws-1-eu-west-1.pooler.supabase.com:6543/postgres"
+    )
+
+    assert "sslmode" not in config.url
+    assert config.connect_args["ssl"] is True
+
+    relaxed = DatabaseConfig.from_url(
+        "postgresql://user:pw@aws-1-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require"
+    )
+
+    assert relaxed.connect_args["ssl"] is not True  # an unverified context, not a bare bool

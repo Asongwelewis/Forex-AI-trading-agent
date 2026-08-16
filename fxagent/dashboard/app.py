@@ -47,6 +47,7 @@ from fxagent.dashboard.source import (
 )
 from fxagent.dashboard.transport import Transport, configured_transport
 from fxagent.dashboard.vendored import path as vendored_chart_library
+from fxagent.store.config import connection_hint
 
 __all__ = ["STATIC_DIR", "VENDOR_SCRIPT", "create_app"]
 
@@ -188,6 +189,9 @@ def create_app(
         except Exception as error:  # noqa: BLE001 - the reason is the useful part
             detail["status"] = "degraded"
             detail["store_error"] = str(error)
+            hint = connection_hint(error)
+            if hint:
+                detail["store_hint"] = hint
 
         if detail["chart_library"] == "missing":
             detail["status"] = "degraded"
@@ -286,8 +290,16 @@ def create_app(
 
 
 def _unavailable(error: Exception) -> JSONResponse:
-    """503 with the reason attached. The panel keeps its last snapshot and shows this."""
-    return JSONResponse({"error": f"could not read the store: {error}"}, status_code=503)
+    """503 with the reason attached, and the fix when the reason is one we recognise.
+
+    The panel prints this where the chart would be, so a deployment problem is legible on the
+    screen rather than sixty lines down a traceback in a log nobody has open.
+    """
+    message = f"could not read the store: {error}"
+    hint = connection_hint(error)
+    if hint:
+        message = f"{message} — {hint}"
+    return JSONResponse({"error": message}, status_code=503)
 
 
 async def _pump(websocket: WebSocket, subscriber: Subscriber) -> None:

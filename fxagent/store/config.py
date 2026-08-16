@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-__all__ = ["DatabaseConfig", "DatabaseConfigError"]
+__all__ = ["DatabaseConfig", "DatabaseConfigError", "connection_hint"]
 
 #: pgbouncer in transaction mode. Prepared statements do not survive between statements here.
 TRANSACTION_POOLER_PORT = 6543
@@ -211,3 +211,35 @@ def _unverified_context() -> ssl.SSLContext:
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     return context
+
+
+#: The signature of a Supabase pooler rejected for its own certificate. Matched on the message
+#: rather than the exception type, because it reaches callers wrapped in whatever the driver and
+#: SQLAlchemy put around it, and the text is the stable part.
+_SELF_SIGNED = "self-signed certificate"
+
+
+def connection_hint(error: BaseException) -> str | None:
+    """Turn a connection failure into the sentence that fixes it, or None if we do not know one.
+
+    This exists because of one specific afternoon. A deployment had the right host, the right
+    transaction-pooler port and the right credentials, and failed every request with
+    `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain` — sixty lines
+    down a traceback, inside a serverless log. The cause was a DSN missing `?sslmode=require`,
+    which `.env.example` warns about in as many words and which nobody reads at the moment they
+    are pasting a URL into a hosting dashboard.
+
+    The suffix is **not** added automatically. `require` means "encrypt but do not verify the
+    chain", and quietly deciding that for a caller who did not ask is a downgrade of someone
+    else's TLS posture — the wrong thing to do silently, however convenient. Naming the fix is
+    the whole job here; applying it stays a decision.
+    """
+    text = str(error)
+    if _SELF_SIGNED in text.lower():
+        return (
+            "Supabase's pooler presents a self-signed certificate on the Postgres port, so a "
+            "DSN with no sslmode is verified in full and refused. Append `?sslmode=require` to "
+            "SUPABASE_DB_URL — it still encrypts, it just does not verify the chain, which is "
+            "what Supabase's own connection string asks for."
+        )
+    return None
