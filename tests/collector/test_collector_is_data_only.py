@@ -26,6 +26,7 @@ FORBIDDEN_PREFIXES = (
     "fxagent.indicators",
     "fxagent.strategies",
     "fxagent.regime",
+    "fxagent.patterns",
     "fxagent.risk",
     "fxagent.memory",
     "fxagent.agents",
