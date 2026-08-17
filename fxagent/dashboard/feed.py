@@ -35,12 +35,18 @@ __all__ = ["AGENT_LAYER_ABSENT", "build_feed"]
 logger = logging.getLogger(__name__)
 
 #: Shown once at the top of the feed while no evaluation carries an `agents` block. A section
-#: that is empty because nothing produces it must not look like a section that is empty because
+#: that is empty because nothing wrote it must not look like a section that is empty because
 #: the agents had nothing to say.
+#:
+#: `fxagent/agents/` exists now and always produces a block — it templates whatever the
+#: providers cannot serve — so this note no longer means "unbuilt". It means these particular
+#: rows were written by a pass that did not call it, which is what a stored evaluation from
+#: before the layer landed looks like.
 AGENT_LAYER_ABSENT = (
     "No evaluation in this window carries agent narration. The agent layer "
-    "(fxagent/agents/) has not been built, so the chartist, historian and risk-officer "
-    "sections stay empty — this is an absent producer, not a quiet one."
+    "(fxagent/agents/) always writes a block when it runs — a deterministic template when no "
+    "provider is reachable — so these rows were written by a pass that did not call it, rather "
+    "than by agents that had nothing to say."
 )
 
 

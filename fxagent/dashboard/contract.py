@@ -4,11 +4,10 @@ The store keeps two JSONB documents per evaluation: `regime`, the classifier's m
 `votes`, the diagnostics dict `Consensus.evaluate` returns. Both are written by the analyst and
 read here. Nothing else in the dashboard touches raw JSON, so the layout is one file's problem.
 
-**Three of the panel's sections have no producer yet.** The agent narrations, the retrieved
-analogues and the candle formations are read from reserved keys inside the `votes` document that
-nothing currently writes. This file therefore does two jobs: it reads what exists today, and it
-states the contract the agent layer must satisfy to light the rest of the panel up. The reserved
-layout is::
+**Every key here now has a producer.** `fxagent/agents/narrate` writes all three narration
+blocks and the retrieved analogues, and `attach_patterns` writes the formations from
+`fxagent/patterns/` — all of them importing `AGENTS_KEY` and `PATTERNS_KEY` from here, so there
+is one definition of the layout rather than two that agree until one is edited. The layout is::
 
     votes = {
         ...                                   # the diagnostics Consensus.evaluate produced
@@ -22,8 +21,9 @@ layout is::
         "patterns": [{"name": str, "definition": str, "bar_time": str?}],
     }
 
-Until those keys appear the panel says so in as many words. An empty section that looks the same
-as a quiet one is how a broken agent goes unnoticed for a week.
+A row written before the producers existed carries none of these keys, and the panel says so in
+as many words rather than drawing an empty card. An empty section that looks the same as a quiet
+one is how a broken agent goes unnoticed for a week.
 
 **A block that fails validation is discarded whole.** Not repaired, not partially rendered — the
 block is dropped, its name is added to `discarded`, and the panel prints that the narration was

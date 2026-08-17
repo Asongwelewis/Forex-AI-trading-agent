@@ -49,6 +49,21 @@ dashboard = [
     "uvicorn[standard]>=0.30",
 ]
 
+# LLM narration. LiteLLM routes to Gemini, Groq and NVIDIA NIM from one call signature, which
+# is what lets `fxagent/agents/gateway.py` treat providers as a config table rather than as
+# three clients. Install with `uv sync --extra llm`.
+#
+# An extra, not a base dependency, and imported inside the call that needs it rather than at
+# module scope. Two things follow, both deliberate. The hourly Actions job and the Vercel
+# bundle carry none of LiteLLM's dependency tree for a pass that may make no LLM call at all;
+# and `fxagent.agents` imports without it, so the deterministic template floor — and the test
+# that proves the pipeline completes with every provider unreachable — does not depend on the
+# very library whose absence it exists to survive. With the extra uninstalled, narration
+# degrades to templates exactly as it does when a key is missing or a provider is down.
+llm = [
+    "litellm>=1.55",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
