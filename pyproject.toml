@@ -110,4 +110,9 @@ markers = [
     # plane and they fail when someone else's site is down — neither of which is our defect.
     # Run them deliberately, with `-m network`, when a feed's shape is in question.
     "network: reaches a real external feed over the internet",
+    # Needs to spawn a fresh interpreter. Sandboxes and locked-down CI runners refuse that with
+    # a PermissionError that says nothing about the code, so these skip with "could not verify"
+    # rather than failing. Deselect them with `-m "not subprocess"` where spawning is never
+    # available, so the skip does not become background noise of its own.
+    "subprocess: spawns a fresh interpreter to measure a real import graph",
 ]

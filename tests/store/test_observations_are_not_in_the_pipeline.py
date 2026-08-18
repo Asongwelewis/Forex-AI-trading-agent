@@ -47,6 +47,7 @@ def test_context_does_not_import_the_observation_repository() -> None:
     )
 
 
+@pytest.mark.subprocess
 def test_the_observations_module_cannot_reach_the_analysis_layer() -> None:
     """`fxagent.observations` must stay importable without dragging analysis code in.
 
@@ -55,21 +56,35 @@ def test_the_observations_module_cannot_reach_the_analysis_layer() -> None:
     `context.py`, which imports `fxagent.strategies.base`. The collector is the natural home for
     the poller and its purity test is AST-based, so it would have seen one innocent import line
     and missed the whole transitive reach. This asserts the actual runtime graph instead.
+
+    **A blocked spawn skips rather than fails.** Measuring the real import graph needs a fresh
+    interpreter, and some sandboxes and CI runners refuse to start one — which arrives as
+    `PermissionError` from `CreateProcess` and has nothing to say about the import graph. A
+    check that is red in every full run is a check people stop reading, and then the day it goes
+    red for a real reason nobody looks. So an unrunnable check reports "could not verify" and
+    says so out loud; a check that ran and found a forbidden import still fails, loudly.
     """
     import subprocess
     import sys
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys, fxagent.observations; "
-            "print(','.join(sorted(m for m in sys.modules if m.startswith('fxagent.'))))",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, fxagent.observations; "
+                "print(','.join(sorted(m for m in sys.modules if m.startswith('fxagent.'))))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except OSError as exc:
+        pytest.skip(
+            f"could not verify: this environment refused to start a subprocess ({exc}). The "
+            "import graph is unchecked in this run — it was not checked and found clean. Run "
+            "this file on its own, or anywhere a fresh interpreter can be spawned."
+        )
     pulled = set(result.stdout.strip().split(","))
     forbidden = {
         m
