@@ -183,6 +183,49 @@ class BarRepository(Repository):
             bars=tuple(self._to_bar(row._mapping) for row in result),  # noqa: SLF001
         )
 
+    async def quotes_between(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        start: datetime,
+        end: datetime,
+        source: str,
+    ) -> dict[datetime, tuple[float | None, float | None]]:
+        """Stored bid/ask at each bar close in the range, keyed by timestamp.
+
+        Separate from `bars_between` because `Bar` deliberately has no bid or ask on it — an
+        OHLC bar is a mid-ish print and the adapter contract says so. The backtest cost model
+        needs the real two-sided quote where the feed carried one, and `None` where it did not,
+        so it can mark the fill `STORED` or `FIXED` rather than guessing. Returning the nulls
+        rather than filtering them out is the point: a missing quote is a fact about the row.
+        """
+        first = require_utc(start, "start")
+        last = require_utc(end, "end")
+        if last < first:
+            raise ValueError(f"end {last} is before start {first}")
+
+        statement = (
+            select(bars.c.ts_utc, bars.c.bid_close, bars.c.ask_close)
+            .where(
+                bars.c.symbol == symbol,
+                bars.c.timeframe == timeframe,
+                bars.c.ts_utc >= first,
+                bars.c.ts_utc <= last,
+                bars.c.source == source,
+            )
+            .order_by(bars.c.ts_utc.asc())
+        )
+
+        result = await self._session.execute(statement)
+        return {
+            row.ts_utc.replace(tzinfo=UTC) if row.ts_utc.tzinfo is None else row.ts_utc: (
+                row.bid_close,
+                row.ask_close,
+            )
+            for row in result
+        }
+
     async def latest_timestamp(
         self, symbol: str, timeframe: str, *, source: str | None = None
     ) -> datetime | None:
