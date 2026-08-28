@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Final
 
 from fxagent.adapters.base import BarSeries, OrderSide
+from fxagent.adapters.mt5_local import SOURCE as MT5_SOURCE
 from fxagent.backtest.barriers import Barrier, BarrierOutcome, resolve_barriers
 from fxagent.costs import CostConfig, Quote, SpreadSource, fill, swap_cost
 from fxagent.regime.bias import DirectionalBias
@@ -63,7 +64,12 @@ logger = logging.getLogger(__name__)
 
 #: The MT5/Exness feed. Named because a backtest on one source and a live run on another are
 #: different experiments — Exness quotes its own book, and its H1 bars are not TwelveData's.
-DEFAULT_SOURCE: Final = "mt5_exness"
+#:
+#: Re-exported from the adapter that writes it rather than restated here. The two used to be
+#: separate string literals that happened to match, which is a rename away from a replay
+#: quietly reading a series nobody is writing — and the symptom would be an empty result, not
+#: an error.
+DEFAULT_SOURCE: Final = MT5_SOURCE
 
 
 #: Which timeframe each strategy reads, taken from the strategy's own constant rather than

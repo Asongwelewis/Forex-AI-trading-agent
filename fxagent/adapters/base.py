@@ -29,6 +29,7 @@ __all__ = [
     "OrderResult",
     "OrderSide",
     "Position",
+    "QuotedBars",
     "Tick",
 ]
 
@@ -114,6 +115,48 @@ class BarSeries(_Contract):
 
     def __len__(self) -> int:
         return len(self.bars)
+
+
+class QuotedBars(_Contract):
+    """A bar series, plus the two-sided quote at each bar's close where the source has one.
+
+    **`Bar` has no bid or ask, and that stays true.** A bar is an OHLC record; a quote is a
+    separate observation that happens to share a timestamp, and merging them would put a
+    nullable pair on every bar in the system for the benefit of the one caller that fills
+    orders. So the two travel together only here, at the collector's boundary, and part ways
+    immediately: `bars` goes to the OHLC columns and `quotes` to `bid_close`/`ask_close`.
+
+    **A missing timestamp means "this source does not know", never "the spread was zero".**
+    Twelve Data publishes no two-sided quote at all, so its map is empty; MT5 publishes a
+    per-bar spread that some brokers leave at zero, and those bars are omitted rather than
+    recorded as bid == ask. The distinction is load-bearing — `costs.fill` falls back to the
+    configured spread for an absent quote and charges nothing at all for a zero one, so
+    conflating them silently flatters every fill in the range.
+    """
+
+    series: BarSeries
+    quotes: dict[UtcDatetime, tuple[float, float]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_quotes(self) -> QuotedBars:
+        stamps = {bar.timestamp for bar in self.series.bars}
+        for timestamp, (bid, ask) in self.quotes.items():
+            if timestamp not in stamps:
+                raise ValueError(
+                    f"quote at {timestamp.isoformat()} has no matching bar in the series"
+                )
+            if bid <= 0 or ask <= 0:
+                raise ValueError(f"quote at {timestamp.isoformat()} has a non-positive side")
+            if ask < bid:
+                raise ValueError(f"ask {ask} is below bid {bid} at {timestamp.isoformat()}")
+        return self
+
+    @property
+    def coverage(self) -> float:
+        """Share of bars carrying a quote. 0.0 on an empty series — nothing is covered."""
+        if not self.series.bars:
+            return 0.0
+        return len(self.quotes) / len(self.series.bars)
 
 
 class Tick(_Contract):

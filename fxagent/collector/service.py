@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from fxagent.adapters.base import BarSeries
+from fxagent.adapters.base import BarSeries, QuotedBars
 from fxagent.adapters.credits import CreditLimitExceeded
 from fxagent.collector.gaps import Gap, find_gaps, merge_adjacent
 from fxagent.store.engine import Database
@@ -295,17 +295,38 @@ class CollectorService:
                 break
         return written
 
+    async def _fetch(
+        self, symbol: str, timeframe: str, *, count: int, end: datetime | None
+    ) -> QuotedBars:
+        """Ask for quotes as well, from the sources that have them.
+
+        Duck-typed rather than added to `DataSource`, and deliberately so. The protocol is
+        narrow because a collector that could place an order is a collector that might, and
+        widening it to a method Twelve Data cannot implement would force every future
+        data-only source to stub something out. A source that has two-sided quotes offers
+        `quoted_bars_ending_at`; one that does not is asked for bars and stores NULL, which is
+        exactly what it knows.
+        """
+        quoted = getattr(self._source, "quoted_bars_ending_at", None)
+        if quoted is not None:
+            return await quoted(symbol, timeframe, count, end=end)
+        series = await self._source.bars_ending_at(symbol, timeframe, count, end=end)
+        return QuotedBars(series=series)
+
     async def _fetch_and_store(
         self, symbol: str, timeframe: str, *, count: int, end: datetime | None
     ) -> int:
-        series = await self._source.bars_ending_at(symbol, timeframe, count, end=end)
+        fetched = await self._fetch(symbol, timeframe, count=count, end=end)
+        series = fetched.series
         if not len(series):
             return 0
 
         async with self._database.begin() as session:
             # `source` comes from the adapter, never from config: a row is identified by where
             # it came from, and letting the two disagree forks the series.
-            written = await BarRepository(session).upsert_series(series, source=self._source.source)
+            written = await BarRepository(session).upsert_series(
+                series, source=self._source.source, quotes=fetched.quotes
+            )
 
         self._stats.bars_written += written
         self._stats.per_symbol[symbol] = self._stats.per_symbol.get(symbol, 0) + written

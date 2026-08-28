@@ -30,12 +30,13 @@ structurally rather than by convention.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, TracebackType
-from typing import Any
+from typing import Any, Final
 
 from fxagent.adapters.base import (
     TIMEFRAMES,
@@ -46,10 +47,19 @@ from fxagent.adapters.base import (
     OrderResult,
     OrderSide,
     Position,
+    QuotedBars,
     Tick,
 )
 
 logger = logging.getLogger(__name__)
+
+#: The `bars.source` every row from this adapter carries.
+#:
+#: Defined here rather than in `backtest/replay.py`, which used to own the constant, because a
+#: bar's source is a property of where it came from. Two definitions of the same string is one
+#: rename away from a replay reading a series the collector is not writing, and the failure
+#: would be an empty result rather than an error.
+SOURCE: Final = "mt5_exness"
 
 #: Beyond this, a detected server offset is not a timezone — it is stale data.
 MAX_PLAUSIBLE_OFFSET = timedelta(hours=14)
@@ -133,6 +143,31 @@ def _bar_from_rate(rate: Any, server_utc_offset: timedelta) -> Bar:
         close=float(rate["close"]),
         volume=int(rate["tick_volume"]),
     )
+
+
+def _quote_from_rate(rate: Any, close: float, point: float) -> tuple[float, float] | None:
+    """The two-sided quote at a bar's close, from the rate row's own `spread` field.
+
+    **MT5 builds bars from Bid ticks**, so `close` is the bid and the ask is `close + spread`.
+    That is the platform default and it is what the terminal draws; a broker serving Ask bars
+    would make every fill here optimistic by exactly one spread, which is why
+    `MT5LocalAdapter.bar_price_side` names the assumption instead of burying it.
+
+    **A spread of zero means the broker did not fill the field in, not that the market was
+    tight.** Returning `(close, close)` for those bars would charge nothing to cross the
+    spread and would do it silently, on precisely the bars where history is thinnest. So they
+    return `None` and fall back to the configured spread, which is at least a number somebody
+    chose. Negative values are the same case and are refused for the same reason.
+
+    Note this is *a* spread within the bar, not the spread at the closing tick — MT5 does not
+    say which, and brokers differ. It is a large improvement on one constant for the whole
+    backtest and it is still not the tail that decides a breakout fill; `fxagent.spreadwatch`
+    measures that separately and neither replaces the other.
+    """
+    spread_points = int(rate["spread"])
+    if spread_points <= 0:
+        return None
+    return (close, close + spread_points * point)
 
 
 def _position_from_mt5(raw: Any, symbol: str, server_utc_offset: timedelta) -> Position:
@@ -480,6 +515,115 @@ class MT5LocalAdapter:
             timeframe=timeframe,
             bars=tuple(_bar_from_rate(rate, offset) for rate in rates),
         )
+
+    # -- DataSource ------------------------------------------------------------
+    #
+    # ADR-005: MT5 is the feed as well as the venue, so this adapter satisfies the collector's
+    # narrow `DataSource` protocol — `source` plus `bars_ending_at` — and nothing more. The
+    # collector can therefore be handed an execution-capable adapter without being able to
+    # reach the parts of it that trade, which is the property
+    # `tests/collector/test_collector_is_data_only.py` exists to protect.
+
+    #: Bars are built from Bid ticks. See `_quote_from_rate`; named so it is an assumption a
+    #: reader can check against their broker rather than a constant buried in arithmetic.
+    bar_price_side: Final = "bid"
+
+    @property
+    def source(self) -> str:
+        return SOURCE
+
+    async def bars_ending_at(
+        self, symbol: str, timeframe: str, count: int, *, end: datetime | None
+    ) -> BarSeries:
+        return (await self.quoted_bars_ending_at(symbol, timeframe, count, end=end)).series
+
+    async def quoted_bars_ending_at(
+        self, symbol: str, timeframe: str, count: int, *, end: datetime | None
+    ) -> QuotedBars:
+        """Bars and their per-bar quotes in **one** terminal call.
+
+        Two calls would be two round trips for data the same structured array already carries,
+        and — worse — the terminal could serve a different window to each, leaving quotes
+        keyed to bars that were not returned.
+
+        The MT5 calls are blocking C, so they run in a worker thread. Nothing here holds the
+        connection open across the await: the terminal handle is process-global inside the
+        MetaTrader5 package, and the whole fetch happens inside the one thread hop.
+        """
+        if timeframe not in TIMEFRAMES:
+            raise ValueError(
+                f"unknown timeframe {timeframe!r}; expected one of {sorted(TIMEFRAMES)}"
+            )
+        if count <= 0:
+            raise ValueError(f"count must be positive, got {count}")
+        if end is not None and end.tzinfo is None:
+            raise ValueError("end must be timezone-aware; a naive datetime is ambiguous here")
+
+        return await asyncio.to_thread(self._quoted_bars_blocking, symbol, timeframe, count, end)
+
+    def _quoted_bars_blocking(
+        self, symbol: str, timeframe: str, count: int, end: datetime | None
+    ) -> QuotedBars:
+        mt5 = self._terminal()
+        broker_symbol = self._select(symbol)
+        period = _mt5_timeframe(mt5, timeframe)
+        offset = self.server_utc_offset
+
+        if end is None:
+            rates = mt5.copy_rates_from_pos(broker_symbol, period, 0, count)
+        else:
+            # `copy_rates_from` returns the `count` bars at or before `date_from`, and it reads
+            # that datetime on the BROKER clock — the same clock whose epochs come back in
+            # `time`. Passing a UTC instant straight through asks for a window shifted by the
+            # server offset, which on a UTC+0 broker like Exness is invisible and on a GMT+3
+            # one silently returns the wrong three hours.
+            rates = mt5.copy_rates_from(broker_symbol, period, end.astimezone(UTC) + offset, count)
+
+        if rates is None or len(rates) == 0:
+            # Not an error. A backfill walking past the start of the broker's history, or a
+            # window over a market holiday, legitimately has no bars — and the collector's gap
+            # logic is what decides whether that matters.
+            code, description = mt5.last_error()
+            logger.debug(
+                "no %s bars for %s ending %s (%s: %s)",
+                timeframe,
+                broker_symbol,
+                end.isoformat() if end else "now",
+                code,
+                description,
+            )
+            return QuotedBars(series=BarSeries(symbol=symbol, timeframe=timeframe, bars=()))
+
+        info = mt5.symbol_info(broker_symbol)
+        point = float(info.point) if info is not None else 0.0
+
+        bars: list[Bar] = []
+        quotes: dict[datetime, tuple[float, float]] = {}
+        for rate in rates:
+            bar = _bar_from_rate(rate, offset)
+            bars.append(bar)
+            if point > 0:
+                quote = _quote_from_rate(rate, bar.close, point)
+                if quote is not None:
+                    quotes[bar.timestamp] = quote
+
+        result = QuotedBars(
+            series=BarSeries(symbol=symbol, timeframe=timeframe, bars=tuple(bars)),
+            quotes=quotes,
+        )
+        if result.coverage < 1.0:
+            # Worth saying out loud: an unquoted bar falls back to the configured spread, and
+            # a range that is mostly fallback is a range whose fills are mostly assumption.
+            logger.info(
+                "%s %s %s: %.0f%% of bars carry a broker spread",
+                broker_symbol,
+                timeframe,
+                self.source,
+                100 * result.coverage,
+            )
+        return result
+
+    # -- BrokerAdapter, continued ----------------------------------------------
 
     def get_tick(self, symbol: str) -> Tick:
         mt5 = self._terminal()

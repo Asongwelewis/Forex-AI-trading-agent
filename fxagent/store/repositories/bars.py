@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -34,14 +34,27 @@ class SeriesSummary:
 class BarRepository(Repository):
     """Reads and writes OHLC bars."""
 
-    async def upsert_series(self, series: BarSeries, *, source: str) -> int:
+    async def upsert_series(
+        self,
+        series: BarSeries,
+        *,
+        source: str,
+        quotes: Mapping[datetime, tuple[float, float]] | None = None,
+    ) -> int:
         """Store a `BarSeries` from any adapter. Re-ingesting the same range is a no-op.
 
         The collector re-fetches overlapping ranges constantly (a restart, a backfill, a
         catch-up after a dropped connection), so this has to be idempotent. The last bar of a
         fetch is usually still forming, which is why values are updated rather than ignored:
         the same timestamp legitimately has a different close a minute later.
+
+        `quotes` carries `bid_close`/`ask_close` for the sources that have them — MT5 does,
+        via the per-bar spread field; Twelve Data does not publish a two-sided quote at all.
+        A timestamp absent from the map stores NULL, which `costs.fill` reads as "fall back to
+        the configured spread". That is a different thing from a stored zero spread, and the
+        difference is why the default here is an empty map rather than zeros.
         """
+        quoted = quotes or {}
         rows = [
             {
                 "symbol": series.symbol,
@@ -52,8 +65,8 @@ class BarRepository(Repository):
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
-                "bid_close": None,
-                "ask_close": None,
+                "bid_close": quoted.get(bar.timestamp, (None, None))[0],
+                "ask_close": quoted.get(bar.timestamp, (None, None))[1],
                 "source": source,
                 "ingested_at": datetime.now(UTC),
             }

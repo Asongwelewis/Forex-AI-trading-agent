@@ -28,6 +28,7 @@ from fxagent.adapters.mt5_local import (
     _snap_offset,
     _utc_from_server_epoch,
 )
+from fxagent.collector.service import DataSource
 
 PROTOCOL_METHODS = (
     "get_bars",
@@ -543,3 +544,167 @@ def test_detection_quotes_the_clock_symbol_not_the_reference_symbol() -> None:
 def test_a_blank_clock_symbol_falls_back_rather_than_selecting_nothing() -> None:
     adapter = MT5LocalAdapter.from_env({**ENV, "MT5_SYMBOL_SUFFIX": "m", "MT5_CLOCK_SYMBOL": "   "})
     assert adapter.clock_symbol == "EURUSD"
+
+
+# --- the adapter as a DataSource (ADR-005) ------------------------------------
+#
+# MT5 is the feed as well as the venue now, so the collector talks to this adapter through
+# its narrow `DataSource` protocol. Two things are worth asserting and neither is obvious:
+# the per-bar spread field becomes a real two-sided quote, and a broker that leaves that
+# field at zero must produce NO quote rather than a zero-width one.
+
+
+class FakeRatesMT5(FakeQuoteMT5):
+    """Serves rate arrays and a symbol_info, so a whole fetch can run against it."""
+
+    TIMEFRAME_M1 = 1
+    TIMEFRAME_M5 = 5
+    TIMEFRAME_M15 = 15
+    TIMEFRAME_M30 = 30
+    TIMEFRAME_H1 = 16385
+    TIMEFRAME_H4 = 16388
+    TIMEFRAME_D1 = 16408
+
+    def __init__(self, *, rates: np.ndarray, point: float = 1e-5) -> None:
+        super().__init__(tick_epoch=None)
+        self._rates = rates
+        self._point = point
+        self.from_pos_calls: list[tuple[str, int, int, int]] = []
+        self.from_calls: list[tuple[str, int, datetime, int]] = []
+
+    def symbol_info(self, symbol: str) -> SimpleNamespace:
+        return SimpleNamespace(point=self._point, spread=12, digits=5)
+
+    def copy_rates_from_pos(
+        self, symbol: str, timeframe: int, start: int, count: int
+    ) -> np.ndarray:
+        self.from_pos_calls.append((symbol, timeframe, start, count))
+        return self._rates
+
+    def copy_rates_from(
+        self, symbol: str, timeframe: int, date_from: datetime, count: int
+    ) -> np.ndarray:
+        self.from_calls.append((symbol, timeframe, date_from, count))
+        return self._rates
+
+    def last_error(self) -> tuple[int, str]:
+        return (0, "ok")
+
+
+def _rates(*, spread_points: int, count: int = 3) -> np.ndarray:
+    base = int(datetime(2026, 1, 5, 8, 0, tzinfo=UTC).timestamp())
+    return np.array(
+        [
+            (base + 3600 * i, 1.10000, 1.10250, 1.09800, 1.10100, 1234, spread_points, 0)
+            for i in range(count)
+        ],
+        dtype=RATE_DTYPE,
+    )
+
+
+def _source_adapter(fake: FakeRatesMT5) -> MT5LocalAdapter:
+    adapter = _adapter_with(fake)
+    adapter._server_utc_offset = timedelta(0)  # Exness is UTC+0; measured, see CLAUDE.md
+    return adapter
+
+
+def test_adapter_satisfies_the_collectors_data_source_protocol() -> None:
+    """Structural, not isinstance: `DataSource` is a plain Protocol and stays that way.
+
+    Making it runtime_checkable to satisfy a test would weaken the thing it protects —
+    isinstance on a Protocol checks only that the names exist, so it would happily accept an
+    execution-capable object as a data source, which is the exact confusion the narrow
+    protocol was written to prevent.
+    """
+    adapter = _source_adapter(FakeRatesMT5(rates=_rates(spread_points=12)))
+
+    assert adapter.source == "mt5_exness"
+    assert callable(adapter.bars_ending_at)
+    signature = inspect.signature(DataSource.bars_ending_at)
+    assert inspect.signature(adapter.bars_ending_at).parameters.keys() == {
+        name for name in signature.parameters if name != "self"
+    }
+
+
+async def test_per_bar_spread_becomes_a_two_sided_quote() -> None:
+    """close is the Bid — MT5 builds bars from Bid ticks — so ask is close + spread."""
+    adapter = _source_adapter(FakeRatesMT5(rates=_rates(spread_points=12), point=1e-5))
+
+    quoted = await adapter.quoted_bars_ending_at("EURUSD", "H1", 3, end=None)
+
+    assert quoted.coverage == 1.0
+    for bar in quoted.series.bars:
+        bid, ask = quoted.quotes[bar.timestamp]
+        assert bid == pytest.approx(bar.close), "the bar close is the bid side"
+        assert ask == pytest.approx(bar.close + 12 * 1e-5)
+
+
+async def test_a_zero_broker_spread_yields_no_quote_rather_than_a_free_fill() -> None:
+    """The single most flattering bug available here, so it gets its own test.
+
+    A broker that never fills the spread field in writes 0. Recording that as bid == ask
+    would charge nothing to cross the spread on every bar in the range, silently. Absent
+    means absent: `costs.fill` then falls back to the configured spread, which is at least
+    a number somebody chose.
+    """
+    adapter = _source_adapter(FakeRatesMT5(rates=_rates(spread_points=0)))
+
+    quoted = await adapter.quoted_bars_ending_at("EURUSD", "H1", 3, end=None)
+
+    assert len(quoted.series) == 3, "the bars themselves are still perfectly good"
+    assert quoted.quotes == {}
+    assert quoted.coverage == 0.0
+
+
+async def test_an_end_time_is_converted_to_the_broker_clock() -> None:
+    """copy_rates_from reads the BROKER clock. Passing a UTC instant shifts the window."""
+    fake = FakeRatesMT5(rates=_rates(spread_points=12))
+    adapter = _adapter_with(fake)
+    adapter._server_utc_offset = timedelta(hours=3)  # a GMT+3 broker, unlike Exness
+
+    end = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+    await adapter.quoted_bars_ending_at("EURUSD", "H1", 3, end=end)
+
+    assert fake.from_calls, "an explicit end must use copy_rates_from, not copy_rates_from_pos"
+    _, _, requested, _ = fake.from_calls[0]
+    assert requested == end + timedelta(hours=3)
+
+
+async def test_no_end_time_reads_from_the_most_recent_bar() -> None:
+    fake = FakeRatesMT5(rates=_rates(spread_points=12))
+    adapter = _source_adapter(fake)
+
+    await adapter.quoted_bars_ending_at("EURUSD", "H1", 5, end=None)
+
+    assert fake.from_pos_calls and not fake.from_calls
+    assert fake.from_pos_calls[0][2:] == (0, 5)
+
+
+async def test_an_empty_window_is_not_an_error() -> None:
+    """A backfill walking past the start of history, or a holiday, legitimately has no bars."""
+    fake = FakeRatesMT5(rates=np.array([], dtype=RATE_DTYPE))
+    adapter = _source_adapter(fake)
+
+    quoted = await adapter.quoted_bars_ending_at("EURUSD", "H1", 3, end=None)
+
+    assert len(quoted.series) == 0
+    assert quoted.quotes == {}
+
+
+async def test_a_naive_end_is_refused_rather_than_assumed_utc() -> None:
+    adapter = _source_adapter(FakeRatesMT5(rates=_rates(spread_points=12)))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await adapter.quoted_bars_ending_at(
+            "EURUSD", "H1", 3, end=datetime(2026, 1, 5, 12, 0)  # noqa: DTZ001
+        )
+
+
+async def test_bars_ending_at_returns_the_series_from_the_same_fetch() -> None:
+    """One terminal call, not two: a second fetch could serve a different window."""
+    fake = FakeRatesMT5(rates=_rates(spread_points=12))
+    adapter = _source_adapter(fake)
+
+    series = await adapter.bars_ending_at("EURUSD", "H1", 3, end=None)
+
+    assert len(series) == 3
+    assert len(fake.from_pos_calls) == 1
