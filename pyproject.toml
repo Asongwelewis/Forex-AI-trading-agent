@@ -10,10 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    # NOTE: both ends of this range are now unjustified and it contradicts CLAUDE.md's stack,
-    # which calls for pandas 3.0.5. The floor was pandas-ta's (dropped) and the `<3` ceiling was
-    # vibe-trading-ai's, which hard rule 10 now forbids importing at all. Left pinned on purpose:
-    # moving to pandas 3.x is an upgrade to run and test on its own, not part of a teardown.
+    # Both ends of this range are historical: the floor was pandas-ta's (dropped in the Phase 5
+    # teardown) and the `<3` ceiling was vibe-trading-ai's, which hard rule 10 now forbids
+    # importing at all. Left pinned deliberately — moving to pandas 3.x is an upgrade to run and
+    # test on its own, not a side effect of another change. CLAUDE.md used to claim 3.0.5 and no
+    # longer does; the pin and the documentation agree now.
     "pandas>=2.3.2,<3",
     "numpy>=2.2.6",
     "pydantic>=2",
@@ -34,12 +35,16 @@ dependencies = [
 [project.optional-dependencies]
 # MetaTrader5 is Windows-only and needs a running terminal. Install with:
 #   uv sync --extra mt5
+# ADR-005 made MT5 the feed as well as the venue, so this extra is now what `fxagent.trader`
+# and `fxagent.spreadwatch` need to run at all — not just the order path. It stays an extra
+# because the dashboard, the backtest and the Actions jobs all run without a terminal.
 mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]
 
-# The dashboard is the one long-lived process in the system, and the only one that needs a web
-# server. Kept out of the base dependency set so the hourly Actions job — which installs with
-# `--no-dev` and no extras — does not carry uvicorn and its C extensions for a pass that never
-# serves a request. Install with `uv sync --extra dashboard`.
+# The dashboard is the only process here that needs a web server. (It is no longer the only
+# long-lived one: ADR-005 added `fxagent.trader`, which runs on the desktop and serves nothing.)
+# Kept out of the base dependency set so the hourly Actions job — which installs with `--no-dev`
+# and no extras — does not carry uvicorn and its C extensions for a pass that never serves a
+# request. Install with `uv sync --extra dashboard`.
 #
 # uvicorn[standard] pulls uvloop, httptools and websockets. All three publish aarch64 wheels,
 # which matters: the container is meant to run on Oracle's ARM instances, where a missing wheel

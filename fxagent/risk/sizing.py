@@ -290,7 +290,21 @@ def position_size(
         )
         return None
 
-    risk_amount = volume * loss_per_lot
+    # `usable_volume` rounds DOWN to the lot step, so `volume <= risk_budget / loss_per_lot`
+    # exactly, and therefore `volume * loss_per_lot <= risk_budget` as real arithmetic. In
+    # floating point the divide-then-multiply round trip can land a few ulps above it —
+    # measured at 0.005000000000000004 against a 0.005 cap on a stop distance that is itself
+    # inexact (1.1000 - 1.0980).
+    #
+    # Four femto-percent of equity is not a risk problem. It is a *reporting* problem, and a
+    # sharp one: `ExecutionPlan.over_trade_cap` is a strict `>`, so without this every
+    # maximally-sized trade — the normal case — would be flagged as breaching the cap, and the
+    # risk officer would say so on every card until nobody read it.
+    #
+    # Clamping is sound rather than cosmetic precisely because of the rounding direction: the
+    # true value provably cannot exceed the budget, so the minimum can only be discarding
+    # error. It is also in the safe direction, which is the rule this whole module follows.
+    risk_amount = min(volume * loss_per_lot, risk_budget)
     return PositionSize(
         spec=symbol_spec,
         direction=direction,
@@ -299,7 +313,7 @@ def position_size(
         stop_loss=stop_loss,
         stop_distance=stop_distance,
         risk_amount=risk_amount,
-        risk_fraction=risk_amount / reference_equity,
+        risk_fraction=min(risk_amount / reference_equity, capped_fraction),
         requested_risk_fraction=capped_fraction,
         reference_equity=reference_equity,
         account_currency=account_currency,

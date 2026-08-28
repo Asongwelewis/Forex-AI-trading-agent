@@ -1,19 +1,58 @@
 # Forex AI trading agent
-An AI bot that analyzes the market within the charts and also suggests when i should make a trade and when i should not make a trade and possible trades on it's own when given permission
+
+An agent that measures the market with deterministic Python, decides whether a trade is on, and
+says so. It **cannot place an order** — the permission layer that would authorise one is not
+built yet, and `tests/trader/test_trader_cannot_execute.py` holds it to that.
+
+Two things worth knowing before reading further:
+
+> **There is no measured edge yet.** The only backtest result is 217 trades over 2024–25 with an
+> expectancy interval of **[-0.15, +0.15]R**, and it assumed a flat 1-pip spread on Twelve Data
+> bars while fills would happen on Exness. That is not "no edge" — it is "no measurement". See
+> Lane 2 of [`docs/BOARD.md`](docs/BOARD.md).
+>
+> **The agent runs only while MT5 is open on the desktop.** Accepted deliberately, for cost.
+> It is also what makes MT5 both the feed and the venue — [ADR-005](docs/ADR-005-single-process.md).
 
 ## Running it
 
-There is nothing to deploy. Every entrypoint is short-lived and idempotent, and GitHub Actions
-cron invokes them on a timer — see [ADR-002](docs/ADR-002-scheduling.md) for why, and for the
-platform constraints the workflows are built around.
+One local process does the trading path; GitHub Actions cron does the things that must keep
+happening while the desktop is off.
+
+```bash
+uv sync --extra mt5
+uv run --extra mt5 python -m fxagent.trader --dry-run   # one pass, full decision, no writes
+uv run --extra mt5 python -m fxagent.trader             # loop until interrupted
+```
+
+`--dry-run` is the command to run first on a new machine: it proves the store is reachable, the
+series is there under the source you think it is, and the pipeline reaches a verdict — without
+putting a row in the ledger from a machine that was only being tested. It exits non-zero if it
+evaluated nothing, because an empty series and a quiet market look identical in the logs.
 
 | Workflow | Schedule | Does |
 |---|---|---|
-| [`collect-and-analyse.yml`](.github/workflows/collect-and-analyse.yml) | `7 * * * *` | collector → analyst → resolver, one job. Alerts to Telegram on failure. |
+| [`collect-and-analyse.yml`](.github/workflows/collect-and-analyse.yml) | `7 * * * *` | Keeps the Twelve Data series current while the desktop is off. Alerts to Telegram on failure. |
 | [`health.yml`](.github/workflows/health.yml) | `23 6 * * *` | Bar gaps, collector heartbeat, Twelve Data credits, repo inactivity. Telegram summary every run. |
 
 Both also take a manual `workflow_dispatch`, which is the only way to run them before this
 lands on `main` — GitHub schedules a workflow from the default branch only.
+
+Analysis and resolution are **not** in Actions: they need a running MT5 terminal, which a
+GitHub runner does not have. They used to be named there as stages pointing at modules that had
+never been written, and the stage action's skip-with-a-warning behaviour meant the pass reported
+success while doing nothing. `tests/test_workflows_name_real_modules.py` now makes that
+impossible to reintroduce silently.
+
+### Measuring the spread
+
+```bash
+uv run --extra mt5 python -m fxagent.spreadwatch --symbols EURUSD,GBPUSD
+```
+
+Leave it running for ten trading days. It sleeps outside the London-open window and samples
+inside it, and it is the input to every cost number in Lane 2. Nothing in the analysis path
+imports it.
 
 ### Required repository secrets
 
