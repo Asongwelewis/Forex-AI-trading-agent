@@ -212,20 +212,40 @@ mechanism; a chat button would be a second one that bypasses it.
 
 *Gate: no edge claim, in either direction, until this lane is green.*
 
-### 2.1 — Run spreadwatch for ten sessions
-`NEW`
+### 2.1 — Spreadwatch: calibrate the historical spread field
+`REVISED 2026-08-28` — this card originally read "ten sessions, start first, everything waits
+on it". That was written before card 1.2 landed and it is no longer right.
 
-**Goal.** A real distribution of Exness spread, per symbol, per hour — especially the London
-open minute.
+**Goal.** Minute-resolution spread inside the London-open window, and — the higher-value half
+— a verdict on what MT5's per-bar `spread` field actually corresponds to, so two years of
+backfilled history can be read correctly.
 
-**Done when.** `spread_samples` holds ≥10 trading days across the traded symbols, and a short
-report gives p50/p75/p90/p99 spread per symbol per hour, plus the London-open minute in
-isolation.
+**Done when.** ≥5 sessions (or 10, see the run order below) in `spread_samples`;
+p50/p75/p90/p99 per symbol per hour; the London-open minute in isolation; and a stated
+calibration verdict.
 
-**Why.** The mean spread over a quiet hour is not the number that matters — `session_breakout`
-fires exactly when a market-maker widens, so the fill that decides the trade is drawn from the
-tail. `spreadwatch.py` exists to measure this and has never been run.
+**Why it is no longer the blocking path.** Card 1.2 established that `copy_rates_*` carries a
+per-bar spread in points, and the backfill now writes it. So card 1.3 delivers ~12,000 H1
+readings per symbol *immediately* — about 2,000 of them inside the London window — against
+~2,400 minute samples from ten days of live sampling. The history also spans two years of
+regimes rather than two weeks of one, which matters more than the count: ten days of sampling
+in August tells you about August. For estimating the distribution, the history wins outright.
 
+**What sampling still uniquely gives.** The H1 bar's spread field is one number for the whole
+hour, and `session_breakout` fills at the close of the breakout bar — so an hourly figure
+cannot separate "quiet hour with one 8-pip spike at the close" from "uniformly 2 pips", which
+are opposite conclusions for this strategy. And MT5 does not document whether that field is the
+minimum, the last tick's, or an average within the bar, and brokers differ. Running spreadwatch
+concurrently lets the two be compared, which is what makes 12,000 historical readings
+interpretable at all. Calibrating a mapping needs far fewer sessions than estimating a
+distribution from scratch: three to five sessions separates min-vs-mean-vs-last comfortably,
+because those candidates differ by a lot.
+
+**Run order.** Card 1.3 first. Its quoted-share headline decides this card's scope — ≥90% and
+this becomes ~5 sessions of calibration with 2.3 runnable within the week; low or zero and
+Exness does not populate the field, spreadwatch is the only cost data there is, and the full
+ten days is real again. `_quote_from_rate` treats a zero spread as *absent* rather than as
+free precisely because nobody has checked which case Exness is.
 ---
 
 ### 2.2 — Measure slippage and swap from the terminal
