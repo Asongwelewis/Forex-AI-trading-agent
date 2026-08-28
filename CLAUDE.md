@@ -9,9 +9,11 @@ Phased build steps live on the Notion board; the current, authoritative card set
 
 ## Two standing gates — check these before proposing work
 
-> **GATE A — no code path places an order until `fxagent/permission/` is complete.**
-> The grant state machine, the auto-revoke triggers and the per-order pre-flight are Lane 3 of
-> `docs/BOARD.md`. `MT5LocalAdapter.place_order` works and is deliberately called by nothing.
+> **GATE A — no code path places an order until a human has run a live smoke test.**
+> `fxagent/permission/` is now complete: the grant state machine, seven auto-revoke triggers and
+> the per-order pre-flight, 92 tests. What remains is that nothing has called it against a real
+> terminal. `MT5LocalAdapter.place_order` works and is still deliberately called by nothing —
+> wiring it is Lane 5 card 5.3, and it needs a person watching.
 >
 > **GATE B — no new strategy or feature work until costs are measured on Exness bars.**
 > The only result this project has is 217 trades over 2024–25 with an expectancy interval of
@@ -21,6 +23,13 @@ Phased build steps live on the Notion board; the current, authoritative card set
 **The agent runs only while the MT5 terminal is open on the Windows desktop.** This is an
 accepted constraint, not a defect: it rules out a paid always-on host. It is also what makes MT5
 both the feed and the venue — see `docs/ADR-005-single-process.md`.
+
+**The MetaTrader 5 MCP server is a measurement tool, never a trading path.** MT5 build 6060+
+exposes trading operations over MCP. Use it in a Claude Code session to read swap points,
+filling modes and symbol specs off the live terminal; set AI-initiated trading to *prohibited*
+in the terminal. `fxagent/` must never import or shell out to it — it would be a second
+authorisation path beside `permission/`, and nothing it did would be replayable. See
+`docs/ADR-006-mt5-mcp.md`.
 
 ## Hard rules — YOU MUST follow these
 
@@ -102,7 +111,7 @@ fxagent/
   strategies/    session_breakout, range_reversion, carry_divergence
   regime/        sessions (zoneinfo), classifier, router, bias, selection
   risk/          position sizing, exposure caps, symbol specs
-  permission/    grant state machine, auto-revoke triggers  ← GATE A: incomplete
+  permission/    grant + triggers + preflight. Authorises; cannot execute (asserted).
   fundamentals/  Forex Factory calendar, central bank RSS, CFTC COT
   memory/        window encoding spec only — no encoder, no index, no retrieval yet
   agents/        chartist (Groq), historian (Gemini), risk_officer (NVIDIA NIM)
