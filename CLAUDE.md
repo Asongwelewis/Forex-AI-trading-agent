@@ -93,6 +93,9 @@ fxagent/
   costs.py       Spread, slippage, swap. TOP LEVEL so backtest and resolver cannot fork.
   spreadwatch.py Local Exness bid/ask sampler. Measurement only, never imported by analysis.
   observations.py Raw BLS/Eurostat prints. Deliberately NOT in fundamentals/ — import graph.
+  trader/        THE RUNNER. cycle (pure decision) + service (loop, journal, notify)
+  resolve/       Closes past decisions against bars that have since arrived
+  alerts/        Telegram. Sends only — no webhook, no callback, no approve button
   adapters/      BrokerAdapter protocol, MT5LocalAdapter, TwelveDataAdapter, MockAdapter
   indicators/    EMA, ATR, ADX, rolling z-score, rolling percentile — hand-written
   patterns/      Candle formation detection. CONTEXT ONLY — must not reach selection.py
@@ -135,6 +138,7 @@ uv run ruff check fxagent tests        # lint
 uv run ruff format fxagent tests       # format
 
 uv run --extra mt5 python -m fxagent.trader --dry-run     # one full cycle, no side effects
+uv run python -m fxagent.resolve                          # close out settled paper trades
 uv run --extra mt5 python -m fxagent.spreadwatch --symbols EURUSD,GBPUSD
 uv run python -m fxagent.collector --symbols EURUSD --timeframes H1
 uv run python -m fxagent.backtest --symbol EUR/USD --from 2024-01-01 --to 2025-12-31

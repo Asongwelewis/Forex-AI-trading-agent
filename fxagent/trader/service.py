@@ -39,9 +39,20 @@ from fxagent.regime.router import RegimeRouter
 from fxagent.regime.selection import SleeveSelector
 from fxagent.risk.symbols import SymbolSpec
 from fxagent.store.engine import Database
-from fxagent.store.repositories import BarRepository, EvaluationRepository, HeartbeatRepository
+from fxagent.store.repositories import (
+    BarRepository,
+    EvaluationRepository,
+    HeartbeatRepository,
+    TradeRepository,
+)
 from fxagent.strategies.carry_divergence import TIMEFRAME as DAILY_TIMEFRAME
-from fxagent.trader.cycle import CycleConfig, CycleResult, ledger_row, run_cycle
+from fxagent.trader.cycle import (
+    CycleConfig,
+    CycleResult,
+    ledger_row,
+    paper_trade,
+    run_cycle,
+)
 
 __all__ = ["TraderConfig", "TraderService", "TraderStats"]
 
@@ -296,9 +307,25 @@ class TraderService:
 
         A cycle that decided and was not recorded is an observation lost the way a missed
         collection window is lost, so this does not swallow. Everything after it does.
+
+        An actionable cycle also opens a **paper** trade in the same transaction, so the
+        evaluation and its trade land together or neither does — the property the store speaks
+        Postgres directly to be able to express. Without that row the resolver has nothing to
+        close, which means no outcome, no expectancy and no label: the journal would accumulate
+        recommendations forever and never learn whether any of them were right.
+
+        `mode="ADVISORY"` is not a formality. `trades_no_live_mode` is a database constraint,
+        so a row claiming to be live is rejected by Postgres and not merely by this code.
         """
         async with self._database.begin() as session:
             evaluation_id = await EvaluationRepository(session).record(**ledger_row(result))
+
+            if result.actionable:
+                await TradeRepository(session).open_trade(
+                    evaluation_id=evaluation_id,
+                    **paper_trade(result, timeframe=self._config.timeframe),
+                )
+
         object.__setattr__(result, "evaluation_id", evaluation_id)
 
     async def _notify(self, result: CycleResult) -> None:

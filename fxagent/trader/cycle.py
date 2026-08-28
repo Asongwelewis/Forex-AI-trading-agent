@@ -33,10 +33,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
-from fxagent.adapters.base import BarSeries
+from fxagent.adapters.base import TIMEFRAMES, BarSeries
 from fxagent.agents.schemas import Briefing, ExecutionPlan
 from fxagent.indicators import adx, atr
 from fxagent.regime.bias import DirectionalBias, carry_bias
@@ -48,7 +48,7 @@ from fxagent.risk.sizing import MAX_RISK_PER_TRADE, NOT_SIZEABLE, RiskConfig, po
 from fxagent.risk.symbols import SymbolSpec
 from fxagent.strategies.base import MarketContext, Signal, Strategy, bars_to_frame
 
-__all__ = ["CycleConfig", "CycleResult", "run_cycle"]
+__all__ = ["CycleConfig", "CycleResult", "ledger_row", "paper_trade", "run_cycle"]
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +303,55 @@ _REGIME_FIELDS = {
     "is_ranging",
     "indicators",
 }
+
+
+def paper_trade(result: CycleResult, *, timeframe: str) -> dict[str, Any]:
+    """The `trades` row for an actionable cycle, as `TradeRepository.open_trade` takes it.
+
+    **`mode` is ADVISORY and there is no argument that changes it.** The row records what the
+    system would have done; `trades_no_live_mode` is a database constraint, so a row claiming to
+    be live is rejected by Postgres and not merely by this function.
+
+    **The entry price is the signal's, not a fill.** Costs are charged once, by the resolver,
+    through `fxagent.costs` — the same module the backtest uses. Charging half of them here
+    would put the paper run and the replay a fraction of a pip apart, and that difference would
+    read as alpha decay rather than as the arithmetic it is.
+
+    **The label span is the trade's whole possible life, not its actual one.** It runs from
+    entry to the time barrier, because that is the window whose outcome this observation
+    depends on, and `folds.purged_walk_forward` removes exactly that window from any training
+    set overlapping a test fold. A span set to the realised exit would be shorter than what was
+    actually known at decision time, and purging on it would leak.
+    """
+    if result.plan is None or result.selection.signal is None:  # pragma: no cover - guarded
+        raise ValueError("only an actionable cycle has a trade row")
+
+    primary = result.selection.signal.primary
+    if primary.stop_loss is None or primary.take_profit is None:  # pragma: no cover - guarded
+        raise ValueError("a trade row needs both a stop and a target")
+
+    return {
+        "symbol": result.symbol,
+        "direction": str(result.selection.signal.direction),
+        "volume": result.plan.volume,
+        "entry_price": primary.entry_price,
+        "entry_time_utc": result.timestamp,
+        "stop_price": primary.stop_loss,
+        "target_price": primary.take_profit,
+        "label_span_start": result.timestamp,
+        "label_span_end": result.timestamp + TIMEFRAMES[timeframe] * MAX_BARS_HELD,
+        "mode": PAPER_MODE,
+    }
+
+
+#: The only mode this system writes. `DEMO_AUTO` becomes reachable when the permission layer
+#: exists; `LIVE` is refused by a database constraint and by hard rule 1.
+PAPER_MODE: Final = "ADVISORY"
+
+#: The time barrier, in bars. Must equal `ReplayConfig.max_bars_held` and
+#: `resolve.service.DEFAULT_MAX_BARS_HELD`, or the label span written here describes a
+#: different horizon from the one the resolver measures against.
+MAX_BARS_HELD: Final = 24
 
 
 def utcnow() -> datetime:
