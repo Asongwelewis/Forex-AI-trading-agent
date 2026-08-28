@@ -1,11 +1,26 @@
 # FX Regime Agent
 
 A forex market-analysis agent. Three uncorrelated strategies sit behind a session-aware regime
-router, produce scored suggestions across 10–12 pairs, and execute automatically on a **demo
-account only**. Three LLM agents narrate the reasoning but never touch the decision path.
+router, which selects **one** of them per bar, sizes the trade deterministically, and executes on
+a **demo account only**. LLM agents narrate the reasoning but never touch the decision path.
 
-Phased build steps and copy-paste prompts live in the Notion board. Architecture and requirements
-live on the Notion main page.
+Phased build steps live on the Notion board; the current, authoritative card set is
+`docs/BOARD.md` in this repo. Architecture decisions live in `docs/ADR-*.md`.
+
+## Two standing gates — check these before proposing work
+
+> **GATE A — no code path places an order until `fxagent/permission/` is complete.**
+> The grant state machine, the auto-revoke triggers and the per-order pre-flight are Lane 3 of
+> `docs/BOARD.md`. `MT5LocalAdapter.place_order` works and is deliberately called by nothing.
+>
+> **GATE B — no new strategy or feature work until costs are measured on Exness bars.**
+> The only result this project has is 217 trades over 2024–25 with an expectancy interval of
+> **[-0.15, +0.15]R**, and it assumed a flat 1-pip spread on TwelveData bars while fills would
+> occur on Exness. That is not "no edge" — it is "no measurement." Lane 2 of `docs/BOARD.md`.
+
+**The agent runs only while the MT5 terminal is open on the Windows desktop.** This is an
+accepted constraint, not a defect: it rules out a paid always-on host. It is also what makes MT5
+both the feed and the venue — see `docs/ADR-005-single-process.md`.
 
 ## Hard rules — YOU MUST follow these
 
@@ -36,49 +51,63 @@ live on the Notion main page.
     `../vibe-sandbox`. Learning from their design is encouraged; coupling to their release cycle
     is not.
 
-## Architecture — three services
+## Architecture — one local process, plus two things that outlive it
 
-| Service | Runs | Job |
+| Runs | Where | Job |
 |---|---|---|
-| `collector` | Oracle ARM, always on | Pulls bars and events → Supabase. No indicators, no LLM. |
-| `analyst` | Oracle ARM, always on | Deterministic core → agents → dashboard + Telegram |
-| `executor` | Local Windows + MT5 | Places orders on the Exness demo |
+| `fxagent.trader` | Local Windows, MT5 open | The whole pipeline: collect → classify → route → select → size → journal → advise or execute |
+| `fxagent.resolve` | Same process, or standalone | Closes out past decisions against bars that have since arrived |
+| GitHub Actions cron | GitHub-hosted | Only what must run with the desktop off: calendar, COT, statistical observations, health |
+| `fxagent.dashboard` | Optional container | Read-only window on the store. Cannot write; asserted by test. |
 
-A power cut at home pauses execution only. The data record stays complete, because analysis can
-always be re-run over stored data while a missed collection window is gone forever.
+There is **no always-on service and no VPS.** The Oracle ARM three-service split was designed
+for a deployment that was never bought and has been retired — see `docs/ADR-002-scheduling.md`
+for the cron decision and `docs/ADR-005-single-process.md` for the collapse to one local process.
+
+The tradeoff is explicit: a missed collection window is gone forever, and the desktop being off
+is a missed window. Uptime is recorded so those gaps are visible rather than silently absent.
 
 ## Stack
 
 - Python 3.12 (`uv`, never pip into system Python). Package is `fxagent/`, **not** `src/`.
-- **Data:** OANDA v20 REST (practice) — primary. No terminal, runs on ARM Linux.
-- **Execution:** MetaTrader 5 + Exness demo (hedging, symbol suffix `m`).
-- **Store:** Supabase Postgres + pgvector. Not SQLite — three services can't share a file.
+- **Data and execution are the same venue:** MetaTrader 5 + Exness demo (hedging, symbol suffix
+  `m`). One book, so the backtest and the live run agree about what a bar is.
+- **Twelve Data** (`fxagent/adapters/twelvedata.py`) is a gap-filler and cross-check only. It is
+  never the source a fill is modelled against — it quotes a different book, and it carries no
+  bid/ask. Its credit budget lives in `adapters/credits.py`.
+- **Store:** Supabase Postgres + pgvector. Not SQLite — the dashboard and the trader are separate
+  processes and Actions runs on a different machine entirely.
 - Indicators are hand-written in `fxagent/indicators/`. No TA library (`pandas-ta` was dropped
   after its archival warning).
-- pandas 3.0.5, numpy, Pydantic v2, APScheduler, vectorbt, pytest, ruff (line length 100).
-- **Chart UI:** TradingView Lightweight Charts (Apache 2.0). Advanced Charts is company-licence
-  only and must not be used.
-- Docker Compose, three services, deployed to Oracle Always Free (ARM — verify ARM wheels).
-- LLM routing via LiteLLM. Hard daily call cap of 50, enforced in code.
+- pandas `>=2.3.2,<3` (**not** 3.x — see the pin comment in `pyproject.toml`), numpy, Pydantic v2,
+  SQLAlchemy async + asyncpg, pytest, ruff (line length 100). No APScheduler, no vectorbt.
+- **Chart UI:** TradingView Lightweight Charts (Apache 2.0), vendored and SHA-pinned. Advanced
+  Charts is company-licence only and must not be used.
+- LLM routing via LiteLLM, an optional extra. Hard daily call cap of 50, enforced in code.
+  `fxagent.agents` imports without LiteLLM installed and degrades to deterministic templates.
 
 ## Project structure
 
 ```
 fxagent/
-  adapters/      BrokerAdapter protocol, OandaAdapter, MT5LocalAdapter, MockAdapter
+  costs.py       Spread, slippage, swap. TOP LEVEL so backtest and resolver cannot fork.
+  spreadwatch.py Local Exness bid/ask sampler. Measurement only, never imported by analysis.
+  observations.py Raw BLS/Eurostat prints. Deliberately NOT in fundamentals/ — import graph.
+  adapters/      BrokerAdapter protocol, MT5LocalAdapter, TwelveDataAdapter, MockAdapter
   indicators/    EMA, ATR, ADX, rolling z-score, rolling percentile — hand-written
-  patterns/      Candle formation detection. CONTEXT ONLY — must not reach consensus.py
+  patterns/      Candle formation detection. CONTEXT ONLY — must not reach selection.py
   strategies/    session_breakout, range_reversion, carry_divergence
-  regime/        sessions (zoneinfo), classifier, router, consensus
-  risk/          position sizing, exposure caps
-  permission/    grant state machine, auto-revoke triggers
+  regime/        sessions (zoneinfo), classifier, router, bias, selection
+  risk/          position sizing, exposure caps, symbol specs
+  permission/    grant state machine, auto-revoke triggers  ← GATE A: incomplete
   fundamentals/  Forex Factory calendar, central bank RSS, CFTC COT
-  memory/        window encoding, pgvector index, point-in-time retrieval
+  memory/        window encoding spec only — no encoder, no index, no retrieval yet
   agents/        chartist (Groq), historian (Gemini), risk_officer (NVIDIA NIM)
+  stats/         returns, performance estimates with intervals, bootstrap resampling
   store/         Supabase repositories and migrations
-  collector/     standalone always-on data service
-  backtest/      purged walk-forward harness
-  dashboard/     FastAPI + Lightweight Charts
+  collector/     data-only ingest service; its import graph is asserted by test
+  backtest/      replay through the live pipeline, purged walk-forward, bootstrap report
+  dashboard/     FastAPI + Lightweight Charts, read-only
 tests/           mirrors fxagent/
 ```
 
@@ -88,20 +117,28 @@ tests/           mirrors fxagent/
 |---|---|---|---|
 | Chartist | Groq | Structured core output | Pixels. Raw price series. |
 | Historian | Gemini Flash | pgvector analogues + past trades | Anything resolving after the current bar |
-| Risk officer | NVIDIA NIM · `deepseek-ai/deepseek-v4-pro` | The computed execution plan | Choose size, stop, or target |
+| Risk officer | NVIDIA NIM · `nvidia/nemotron-3-ultra-550b-a55b` | The computed execution plan | Choose size, stop, or target |
 
 `proceed_recommendation` from the risk officer is **advisory only**. It is displayed and logged.
 It does not gate execution — the deterministic permission layer does, and nothing else.
+
+The historian currently narrates an empty `analogues` list, because `fxagent/memory/` is a
+128-dimension encoding spec with no encoder, no index and no retrieval query. Do not describe
+retrieval as working until it is.
 
 ## Commands
 
 ```bash
 uv run pytest                          # full suite
+uv run pytest -m "not db"              # no-container subset
 uv run ruff check fxagent tests        # lint
 uv run ruff format fxagent tests       # format
-uv run python -m fxagent.main --dry-run
-uv run python -m fxagent.backtest --symbol EUR_USD --from 2024-01-01 --to 2025-12-31
-docker compose up                      # all three services locally
+
+uv run --extra mt5 python -m fxagent.trader --dry-run     # one full cycle, no side effects
+uv run --extra mt5 python -m fxagent.spreadwatch --symbols EURUSD,GBPUSD
+uv run python -m fxagent.collector --symbols EURUSD --timeframes H1
+uv run python -m fxagent.backtest --symbol EUR/USD --from 2024-01-01 --to 2025-12-31
+uv run python -m fxagent.dashboard                        # http://localhost:8080
 ```
 
 ## Git workflow
@@ -140,12 +177,25 @@ then convert at evaluation time. Forex runs Sunday 21:00 UTC to Friday 21:00 UTC
 
 | Strategy | Timeframe | Regime gate |
 |---|---|---|
-| `session_breakout` | Intraday | London open, ADX > 25 |
-| `range_reversion` | Intraday | ADX < 20, outside the overlap |
-| `carry_divergence` | Multi-day | Macro trend, rate differential |
+| `session_breakout` | H1 | London open, ADX > 25 |
+| `range_reversion` | Intraday, any | ADX < 20, outside the overlap |
+| `carry_divergence` | D1 | Macro trend, rate differential |
 
-A signal fires only when **≥2 of 3 agree AND the router permits that strategy now.** Log every
-disagreement — it is training data, not noise.
+**The router selects one sleeve. Strategies do not vote.** The old rule — "≥2 of 3 agree AND the
+router permits" — was unsatisfiable by construction and is gone. `session_breakout` gates on
+ADX > 25 and `range_reversion` on ADX < 20, so the second vote could never arrive; over 12,341
+decisions in the 2024–25 replay the router gave positive weight to two strategies on **zero**
+bars and the system took **zero** trades. The full autopsy is the module docstring of
+`fxagent/regime/selection.py`. Do not reintroduce an agreement count.
+
+What replaces the lost redundancy: confirmation moved *inside* each strategy, where the evidence
+families are genuinely independent, and `regime/bias` filters an intraday signal that opposes the
+daily view (it never originates one).
+
+**The rejection ledger is non-negotiable.** Every strategy in the router's slate gets a line on
+every bar, including the silent and gated ones, with the reason recorded on the rejection path
+exactly as on the firing path. That ledger is what found the failure above — the trade log could
+not have. It is training data, not noise.
 
 ## Success metrics
 
@@ -165,6 +215,17 @@ profit factor and max drawdown — and return `INSUFFICIENT_DATA` below 100 trad
 - **`symbol_info().filling_mode` is a bitmask**, not an enum value.
 - **Candlestick patterns have weak evidence** — two studies found no net positive return on
   EUR/USD after costs. They are UI context, never signal inputs.
+- **Feed and venue must be the same book.** A backtest on one source and fills on another is a
+  different experiment wearing the same name. `bars.source` is part of a bar's identity; a replay
+  and a live run reading different sources are not comparable and must not be reported as if
+  they were.
+- **A green suite over disconnected parts stays green.** The test suite covers components. It
+  cannot see that a workflow names a module which does not exist, or that nothing calls the
+  code path being protected. Assembly is not tested by unit tests — wire an integration test
+  through the real entrypoint.
+- **The Forex Factory feed is current-week only.** `ff_calendar_nextweek.json` is a 404, so on a
+  Friday the lookahead cannot see Sunday's open. Absence of an event is not evidence of no
+  event: fail **closed** and refuse.
 
 ## Style
 
