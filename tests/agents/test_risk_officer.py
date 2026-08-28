@@ -16,7 +16,7 @@ import pytest
 
 from fxagent.agents import risk_officer
 from fxagent.agents.gateway import CallBudget, Gateway, Prompt, ProviderConfig, ProviderError
-from fxagent.agents.narrate import TEMPLATE_PROVIDER, narrate
+from fxagent.agents.narrate import LEGACY_AGENTS, TEMPLATE_PROVIDER, narrate
 from fxagent.agents.schemas import (
     MAX_PLAN_SUMMARY_CHARS,
     RiskOfficerNote,
@@ -81,7 +81,7 @@ def _full_briefing():
 async def test_the_prompt_carries_the_sized_order_the_conditions_and_the_other_agents() -> None:
     transport = Canned()
 
-    await narrate(_full_briefing(), gateway=_gateway(transport))
+    await narrate(_full_briefing(), gateway=_gateway(transport), agents=LEGACY_AGENTS)
 
     sent = json.loads(transport.prompts[-1].user)
     assert sent["plan"]["direction"] == "LONG"

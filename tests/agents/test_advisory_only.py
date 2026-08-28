@@ -33,7 +33,7 @@ import pytest
 import fxagent
 from fxagent.agents import risk_officer
 from fxagent.agents.gateway import Gateway, Prompt, ProviderConfig, ProviderError
-from fxagent.agents.narrate import TEMPLATE_PROVIDER, attach_narration, narrate
+from fxagent.agents.narrate import LEGACY_AGENTS, TEMPLATE_PROVIDER, attach_narration, narrate
 from fxagent.agents.schemas import PROCEED_RECOMMENDATIONS
 from fxagent.dashboard.contract import CHARTIST, HISTORIAN, RISK_OFFICER, read_agents
 from tests.agents.builders import MOMENT, execution, fired_briefing
@@ -110,7 +110,7 @@ async def test_a_wait_leaves_the_trade_plan_exactly_as_the_core_computed_it() ->
     briefing = fired_briefing(execution=execution())
     before = briefing.plan.model_dump() if briefing.plan is not None else None
 
-    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")))
+    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")), agents=LEGACY_AGENTS)
 
     assert blocks[RISK_OFFICER][FIELD] == "WAIT"
     assert briefing.plan is not None
@@ -127,9 +127,13 @@ async def test_a_wait_changes_nothing_a_proceed_would_not() -> None:
     """
     briefing = fired_briefing(execution=execution())
 
-    proceeding = await narrate(briefing, gateway=_gateway(_risk_response("PROCEED")))
-    waiting = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")))
-    silent = await narrate(briefing, gateway=_gateway(None))
+    proceeding = await narrate(
+        briefing, gateway=_gateway(_risk_response("PROCEED")), agents=LEGACY_AGENTS
+    )
+    waiting = await narrate(
+        briefing, gateway=_gateway(_risk_response("WAIT")), agents=LEGACY_AGENTS
+    )
+    silent = await narrate(briefing, gateway=_gateway(None), agents=LEGACY_AGENTS)
 
     for other in (waiting, silent):
         assert set(other) == set(proceeding)
@@ -149,7 +153,7 @@ async def test_the_stored_evaluation_still_says_the_signal_fired() -> None:
     briefing = fired_briefing(execution=execution())
     diagnostics = {"fired": True, "winning_direction": "LONG", "reason": "2 strategies agreed"}
 
-    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")))
+    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")), agents=LEGACY_AGENTS)
     document = attach_narration(diagnostics, blocks)
 
     assert document["fired"] is True
@@ -161,7 +165,7 @@ async def test_the_panel_shows_the_wait_beside_a_plan_that_is_still_there() -> N
     """Displayed, which is the whole permitted use — next to the levels it did not change."""
     briefing = fired_briefing(execution=execution())
 
-    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")))
+    blocks = await narrate(briefing, gateway=_gateway(_risk_response("WAIT")), agents=LEGACY_AGENTS)
     parsed = read_agents({"agents": blocks})
 
     assert parsed.discarded == ()
@@ -178,7 +182,9 @@ async def test_narrate_returns_no_signal_a_caller_could_mistake_for_a_gate() -> 
     the return value is one text block per agent and nothing else.
     """
     blocks = await narrate(
-        fired_briefing(execution=execution()), gateway=_gateway(_risk_response("WAIT"))
+        fired_briefing(execution=execution()),
+        gateway=_gateway(_risk_response("WAIT")),
+        agents=LEGACY_AGENTS,
     )
 
     assert set(blocks) == {CHARTIST, HISTORIAN, RISK_OFFICER}
