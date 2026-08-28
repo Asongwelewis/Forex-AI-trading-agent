@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from fxagent.agents.gateway import Gateway, Prompt, ProviderConfig
-from fxagent.agents.narrate import AGENTS, TEMPLATE_PROVIDER, narrate
+from fxagent.agents.narrate import AGENTS, LEGACY_AGENTS, TEMPLATE_PROVIDER, narrate
 from fxagent.dashboard.contract import CHARTIST, HISTORIAN, RISK_OFFICER, read_agents
 from tests.agents.builders import analogue, fired_briefing
 
@@ -56,6 +56,16 @@ class ByAgentTransport:
 async def _nap(_seconds: float) -> None: ...
 
 
+async def test_live_registry_only_runs_the_chartist() -> None:
+    transport = ByAgentTransport(chartist=GOOD_CHARTIST, historian=GOOD_HISTORIAN)
+
+    blocks = await narrate(fired_briefing(), gateway=_gateway(transport))
+
+    assert tuple(spec.name for spec in AGENTS) == (CHARTIST,)
+    assert set(blocks) == {CHARTIST}
+    assert [agent for agent, _ in transport.seen] == [CHARTIST]
+
+
 def _gateway(transport: object) -> Gateway:
     return Gateway((PROVIDER,), transport=transport, env=ENV, sleep=_nap)  # type: ignore[arg-type]
 
@@ -64,7 +74,7 @@ async def test_a_valid_response_is_used_and_stamped_with_who_wrote_it() -> None:
     transport = ByAgentTransport(chartist=GOOD_CHARTIST, historian=GOOD_HISTORIAN)
     briefing = fired_briefing(analogues=(analogue(1),))
 
-    blocks = await narrate(briefing, gateway=_gateway(transport))
+    blocks = await narrate(briefing, gateway=_gateway(transport), agents=LEGACY_AGENTS)
 
     assert blocks[CHARTIST]["provider"] == "alpha"
     assert blocks[CHARTIST]["model"] == "alpha/m"
@@ -84,9 +94,9 @@ async def test_the_agents_are_asked_one_at_a_time_in_the_order_the_registry_list
     )
     briefing = fired_briefing()
 
-    await narrate(briefing, gateway=_gateway(transport))
+    await narrate(briefing, gateway=_gateway(transport), agents=LEGACY_AGENTS)
 
-    assert [agent for agent, _ in transport.seen] == [spec.name for spec in AGENTS]
+    assert [agent for agent, _ in transport.seen] == [spec.name for spec in LEGACY_AGENTS]
 
 
 async def test_only_the_agent_that_opted_in_is_shown_what_the_others_said() -> None:
@@ -96,7 +106,7 @@ async def test_only_the_agent_that_opted_in_is_shown_what_the_others_said() -> N
     )
     briefing = fired_briefing()
 
-    await narrate(briefing, gateway=_gateway(transport))
+    await narrate(briefing, gateway=_gateway(transport), agents=LEGACY_AGENTS)
 
     shown = dict(transport.seen)
     assert shown[CHARTIST] == briefing.rendered()
@@ -112,7 +122,9 @@ async def test_an_invented_number_sends_that_agent_back_to_the_template() -> Non
     invented = json.dumps({"read": "Watch 1.2345 closely."})
     transport = ByAgentTransport(chartist=invented, historian=GOOD_HISTORIAN)
 
-    blocks = await narrate(fired_briefing(analogues=(analogue(1),)), gateway=_gateway(transport))
+    blocks = await narrate(
+        fired_briefing(analogues=(analogue(1),)), gateway=_gateway(transport), agents=LEGACY_AGENTS
+    )
 
     assert blocks[CHARTIST]["provider"] == TEMPLATE_PROVIDER
     assert blocks[HISTORIAN]["provider"] == "alpha"
@@ -140,7 +152,9 @@ async def test_a_recommendation_field_the_schema_never_asked_for_is_discarded() 
 async def test_an_llm_written_block_is_readable_by_the_dashboard() -> None:
     transport = ByAgentTransport(chartist=GOOD_CHARTIST, historian=GOOD_HISTORIAN)
 
-    blocks = await narrate(fired_briefing(analogues=(analogue(1),)), gateway=_gateway(transport))
+    blocks = await narrate(
+        fired_briefing(analogues=(analogue(1),)), gateway=_gateway(transport), agents=LEGACY_AGENTS
+    )
     parsed = read_agents({"agents": blocks})
 
     assert parsed.discarded == ()
@@ -164,7 +178,7 @@ async def test_backtest_mode_prompts_carry_no_date() -> None:
     transport = ByAgentTransport(chartist=GOOD_CHARTIST, historian=GOOD_HISTORIAN)
     briefing = fired_briefing(analogues=(analogue(1),))
 
-    await narrate(briefing, gateway=_gateway(transport), include_dates=False)
+    await narrate(briefing, gateway=_gateway(transport), include_dates=False, agents=LEGACY_AGENTS)
 
     for _, user in transport.seen:
         assert "2026" not in user
@@ -172,7 +186,7 @@ async def test_backtest_mode_prompts_carry_no_date() -> None:
 
 
 async def test_each_agent_asks_the_provider_claude_md_pins_it_to() -> None:
-    by_name = {spec.name: spec for spec in AGENTS}
+    by_name = {spec.name: spec for spec in LEGACY_AGENTS}
 
     assert by_name[CHARTIST].prefer == ("groq",)
     assert by_name[HISTORIAN].prefer == ("gemini",)
@@ -194,7 +208,9 @@ async def test_the_pin_reaches_the_gateway_as_a_preference_on_the_prompt() -> No
             return {CHARTIST: GOOD_CHARTIST, HISTORIAN: GOOD_HISTORIAN}.get(prompt.agent, GOOD_RISK)
 
     await narrate(
-        fired_briefing(analogues=(analogue(1),)), gateway=_gateway(PreferenceRecordingTransport())
+        fired_briefing(analogues=(analogue(1),)),
+        gateway=_gateway(PreferenceRecordingTransport()),
+        agents=LEGACY_AGENTS,
     )
 
     assert seen == [

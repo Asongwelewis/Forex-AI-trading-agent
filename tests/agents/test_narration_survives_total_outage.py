@@ -25,7 +25,13 @@ from fxagent.agents.gateway import (
     ProviderError,
     RateLimited,
 )
-from fxagent.agents.narrate import AGENTS, TEMPLATE_PROVIDER, attach_narration, narrate
+from fxagent.agents.narrate import (
+    AGENTS,
+    LEGACY_AGENTS,
+    TEMPLATE_PROVIDER,
+    attach_narration,
+    narrate,
+)
 from fxagent.dashboard.contract import AGENTS_KEY, CHARTIST, HISTORIAN, read_agents
 from tests.agents.builders import MOMENT, analogue, declined_briefing, fired_briefing
 
@@ -114,7 +120,7 @@ async def test_the_blocks_are_readable_by_the_dashboard_without_a_single_discard
     drifting apart, which is the failure a shape test written twice cannot see.
     """
     briefing = fired_briefing(analogues=(analogue(1), analogue(2, similarity=0.81)))
-    blocks = await narrate(briefing, gateway=_gateway(DeadTransport()))
+    blocks = await narrate(briefing, gateway=_gateway(DeadTransport()), agents=LEGACY_AGENTS)
 
     document = attach_narration({"fired": True}, blocks)
     assert document[AGENTS_KEY] is blocks
@@ -130,7 +136,7 @@ async def test_the_blocks_are_readable_by_the_dashboard_without_a_single_discard
 async def test_retrieved_analogues_survive_the_outage() -> None:
     """The analogues are retrieval's output. No agent had to be reachable for them to appear."""
     briefing = fired_briefing(analogues=(analogue(7),))
-    blocks = await narrate(briefing, gateway=_gateway(DeadTransport()))
+    blocks = await narrate(briefing, gateway=_gateway(DeadTransport()), agents=LEGACY_AGENTS)
 
     assert blocks[HISTORIAN]["provider"] == TEMPLATE_PROVIDER
     assert blocks[HISTORIAN]["analogues"] == [
@@ -179,7 +185,7 @@ async def test_an_exhausted_daily_budget_falls_back_rather_than_raising() -> Non
 
 async def test_no_gateway_at_all_templates_everything() -> None:
     """How a backtest runs: no model, no cost, and no run-to-run variation in the commentary."""
-    blocks = await narrate(fired_briefing(analogues=(analogue(),)))
+    blocks = await narrate(fired_briefing(analogues=(analogue(),)), agents=LEGACY_AGENTS)
 
     assert all(block["provider"] == TEMPLATE_PROVIDER for block in blocks.values())
     assert blocks[HISTORIAN]["analogues"]

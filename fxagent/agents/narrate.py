@@ -49,6 +49,7 @@ from fxagent.dashboard.contract import AGENTS_KEY, HISTORIAN, PATTERNS_KEY
 
 __all__ = [
     "AGENTS",
+    "LEGACY_AGENTS",
     "TEMPLATE_PROVIDER",
     "AgentSpec",
     "attach_narration",
@@ -67,7 +68,13 @@ TEMPLATE_PROVIDER = "template"
 #: which matters: the risk officer's spec opts into reading what the other two said, and it can
 #: only read what has already been produced. A fourth agent is a module beside theirs and a
 #: fourth entry here.
-AGENTS: tuple[AgentSpec, ...] = (chartist.SPEC, historian.SPEC, risk_officer.SPEC)
+## The active registry contains the chartist only. The retired specs remain available in
+## LEGACY_AGENTS for compatibility with historical evaluations.
+AGENTS: tuple[AgentSpec, ...] = (chartist.SPEC,)
+
+# Compatibility registry for re-rendering old three-agent evaluations. This is deliberately not
+# the default and must never be passed by the trader.
+LEGACY_AGENTS: tuple[AgentSpec, ...] = (chartist.SPEC, historian.SPEC, risk_officer.SPEC)
 
 
 def _analogue_blocks(briefing: Briefing) -> list[dict[str, Any]]:
