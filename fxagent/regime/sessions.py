@@ -50,6 +50,7 @@ __all__ = [
     "is_market_open",
     "local_time",
     "minutes_until_close",
+    "next_weekly_close",
     "session_bounds_utc",
 ]
 
@@ -235,8 +236,13 @@ def is_market_open(moment: datetime) -> bool:
     return True
 
 
-def _next_weekly_close(moment: datetime) -> datetime:
+def next_weekly_close(moment: datetime) -> datetime:
     """The first Friday 17:00 New York strictly after `moment`, as a UTC instant.
+
+    Public because `fxagent.permission` clamps every grant expiry to it. A grant that outlived
+    the weekly close would hold a position through the weekend gap, which is the thing grants
+    exist to avoid, and re-deriving the boundary there would be a second definition of the FX
+    week for it to drift from.
 
     Anchored on the New York calendar rather than the UTC one: late on a Friday UTC evening
     it is still Friday in New York, and stepping forward on the wrong calendar would skip a
@@ -261,7 +267,7 @@ def minutes_until_close(moment: datetime) -> int:
     """
     if not is_market_open(moment):
         return 0
-    remaining = _next_weekly_close(moment) - _require_aware(moment)
+    remaining = next_weekly_close(moment) - _require_aware(moment)
     return int(remaining.total_seconds() // 60)
 
 
