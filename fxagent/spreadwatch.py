@@ -46,6 +46,8 @@ __all__ = [
     "LONDON_WINDOW_END_UTC",
     "LONDON_WINDOW_START_UTC",
     "SpreadSample",
+    "SpreadDistribution",
+    "calibrate",
     "in_window",
     "sample_once",
     "subscribe",
@@ -104,6 +106,72 @@ class SpreadSample:
             "source": self.source,
             "ingested_at": datetime.now(UTC),
         }
+
+
+@dataclass(frozen=True)
+class SpreadDistribution:
+    """A measured spread distribution, in pips, suitable for a calibration report.
+
+    This is descriptive evidence only. The backtest must not consume a percentile until the
+    operator has reviewed the sample window and source metadata.
+    """
+
+    symbol: str
+    source: str
+    samples: int
+    p50_pips: float
+    p90_pips: float
+    p95_pips: float
+    p99_pips: float
+    max_pips: float
+
+    def render(self) -> str:
+        return (
+            f"{self.symbol} ({self.source}) n={self.samples}: "
+            f"p50={self.p50_pips:.2f} p90={self.p90_pips:.2f} "
+            f"p95={self.p95_pips:.2f} p99={self.p99_pips:.2f} max={self.max_pips:.2f} pips"
+        )
+
+
+def _pip_size(price: float) -> float:
+    return 0.01 if price > 20 else 0.0001
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = (len(ordered) - 1) * fraction
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
+
+
+def calibrate(samples: list[SpreadSample] | tuple[SpreadSample, ...]) -> SpreadDistribution:
+    """Summarise one symbol/source's recorded quotes without dropping the tail.
+
+    A mixed-symbol or mixed-source input is rejected: pooling different point sizes or broker
+    books creates a plausible-looking percentile that cannot calibrate any one execution path.
+    """
+    if not samples:
+        raise ValueError("calibrate requires at least one spread sample")
+    symbols = {sample.symbol for sample in samples}
+    sources = {sample.source for sample in samples}
+    if len(symbols) != 1 or len(sources) != 1:
+        raise ValueError("calibrate requires samples for exactly one symbol and source")
+    spreads = [
+        (sample.ask - sample.bid) / _pip_size((sample.ask + sample.bid) / 2.0) for sample in samples
+    ]
+    return SpreadDistribution(
+        symbol=samples[0].symbol,
+        source=samples[0].source,
+        samples=len(spreads),
+        p50_pips=_percentile(spreads, 0.50),
+        p90_pips=_percentile(spreads, 0.90),
+        p95_pips=_percentile(spreads, 0.95),
+        p99_pips=_percentile(spreads, 0.99),
+        max_pips=max(spreads),
+    )
 
 
 def in_window(moment: datetime) -> bool:

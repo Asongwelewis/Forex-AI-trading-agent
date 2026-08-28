@@ -119,6 +119,9 @@ class ReplayConfig:
     #: The time barrier, in bars. 24 on H1 is a day — past which an intraday setup is not what
     #: it was, whatever the price is doing.
     max_bars_held: int = 24
+    #: Measured symbol-hour p90 spread in pips. ``None`` keeps the gate disabled until Lane 2
+    #: calibration has been reviewed; a missing quote cannot be mistaken for a zero spread.
+    spread_ceiling_pips: float | None = None
     #: Injected rather than fetched. `MarketContext.neutral()` means no rate differential, which
     #: makes `carry_divergence` structurally silent — reported, not hidden, in `ReplayResult`.
     context: MarketContext = field(default_factory=MarketContext.neutral)
@@ -128,6 +131,8 @@ class ReplayConfig:
             raise ValueError(f"history_bars must be positive, got {self.history_bars}")
         if self.max_bars_held < 1:
             raise ValueError(f"max_bars_held must be positive, got {self.max_bars_held}")
+        if self.spread_ceiling_pips is not None and self.spread_ceiling_pips <= 0:
+            raise ValueError("spread_ceiling_pips must be positive when configured")
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,7 @@ class ReplayResult:
     carry_is_inert: bool
     first_bar: datetime | None
     last_bar: datetime | None
+    spread_refusals: int = 0
 
     @property
     def ambiguous(self) -> int:
@@ -214,7 +220,7 @@ class ReplayResult:
         lines = [
             f"{self.symbol}: {self.bars_replayed:,} bars replayed, {self.decisions:,} decisions",
             f"  {self.fired} fired, {self.skipped_in_position} skipped in position, "
-            f"{self.not_sizeable} not sizeable",
+            f"{self.not_sizeable} not sizeable, {self.spread_refusals} spread-refused",
             f"  spread: {stored} stored, {fixed} fixed",
             f"  intrabar ambiguity: {self.ambiguous}/{len(self.trades)} "
             f"({self.ambiguity_rate:.1%}), all resolved as STOP",
@@ -278,7 +284,7 @@ def replay(
 
     trades: list[ReplayTrade] = []
     spread_sources: Counter[str] = Counter()
-    decisions = fired = skipped = not_sizeable = 0
+    decisions = fired = skipped = not_sizeable = spread_refusals = 0
     carry_voted = False
     open_until_index = -1
 
@@ -321,6 +327,15 @@ def replay(
 
         side = order_side_for(agreed.direction)
         bid, ask = quote_map.get(bar.timestamp, (None, None))
+        if (
+            config.spread_ceiling_pips is not None
+            and bid is not None
+            and ask is not None
+            and ask >= bid
+            and (ask - bid) / config.spec.pip > config.spread_ceiling_pips
+        ):
+            spread_refusals += 1
+            continue
         entry_fill = fill(bar.close, side, config.spec, config.costs, Quote(bid=bid, ask=ask))
 
         size = position_size(
@@ -364,6 +379,7 @@ def replay(
         carry_is_inert="carry_divergence" in engine_strategies and not carry_voted,
         first_bar=bars.bars[0].timestamp if len(bars) else None,
         last_bar=bars.bars[-1].timestamp if len(bars) else None,
+        spread_refusals=spread_refusals,
     )
 
 

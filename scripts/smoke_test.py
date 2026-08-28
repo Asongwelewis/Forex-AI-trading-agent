@@ -27,8 +27,8 @@ from datetime import timedelta
 
 from dotenv import load_dotenv
 
-from fxagent.adapters.base import BarSeries
-from fxagent.adapters.divergence import compare_series, interpret
+from fxagent.adapters.base import BarSeries, OrderSide
+from fxagent.adapters.divergence import compare_series, gap_filler_verdict, interpret
 
 BAR_COUNT = 100
 TIMEFRAME = "H1"
@@ -114,9 +114,26 @@ async def _run(args: argparse.Namespace) -> int:
         for i in range(len(ordered)):
             for j in range(i + 1, len(ordered)):
                 (left_name, left), (right_name, right) = ordered[i], ordered[j]
-                divergence = compare_series(left_name, left, right_name, right)
+                barrier = (
+                    (
+                        args.barrier_stop_pips,
+                        args.barrier_target_pips,
+                    )
+                    if args.barrier_stop_pips and args.barrier_target_pips
+                    else None
+                )
+                divergence = compare_series(
+                    left_name,
+                    left,
+                    right_name,
+                    right,
+                    barrier_pips=barrier,
+                    side=OrderSide(args.side),
+                )
                 print(divergence.render(), end="")
                 print(interpret(divergence))
+                if "twelvedata" in {left_name, right_name}:
+                    print(f"  gap-filler verdict: {gap_filler_verdict(divergence)}")
 
     print("\nno orders were placed.")
     return 0
@@ -133,6 +150,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", default="EURUSD")
     parser.add_argument("--timeframe", default=TIMEFRAME)
     parser.add_argument("--count", type=int, default=BAR_COUNT)
+    parser.add_argument(
+        "--side", choices=[side.value for side in OrderSide], default=OrderSide.BUY.value
+    )
+    parser.add_argument(
+        "--barrier-stop-pips",
+        type=float,
+        default=0.0,
+        help="stop distance used to measure high/low barrier-touch flips",
+    )
+    parser.add_argument(
+        "--barrier-target-pips",
+        type=float,
+        default=0.0,
+        help="target distance used to measure high/low barrier-touch flips",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

@@ -20,6 +20,7 @@ from fxagent.spreadwatch import (
     LONDON_WINDOW_END_UTC,
     LONDON_WINDOW_START_UTC,
     SpreadSample,
+    calibrate,
     in_window,
     sample_once,
     subscribe,
@@ -224,3 +225,30 @@ class TestTheRecordShape:
             spread_float=True,
         )
         assert sample.derived_points == 0.0
+
+
+class TestCalibration:
+    def _sample(self, spread_pips: float, *, symbol: str = "EURUSD") -> SpreadSample:
+        bid = 1.1000
+        return SpreadSample(
+            symbol=symbol,
+            broker_symbol=f"{symbol}m",
+            sampled_at=at(TUESDAY, 9),
+            bid=bid,
+            ask=bid + spread_pips * 0.0001,
+            spread_points=round(spread_pips * 10),
+            point=1e-05,
+            spread_float=True,
+        )
+
+    def test_calibration_keeps_the_tail_percentiles(self) -> None:
+        report = calibrate([self._sample(value) for value in (1.0, 1.0, 2.0, 10.0)])
+        assert report.samples == 4
+        assert report.p50_pips == pytest.approx(1.5)
+        assert report.p90_pips > report.p50_pips
+        assert report.max_pips == pytest.approx(10.0)
+        assert "p95=" in report.render()
+
+    def test_calibration_does_not_pool_symbols_or_sources(self) -> None:
+        with pytest.raises(ValueError, match="exactly one symbol and source"):
+            calibrate([self._sample(1.0), self._sample(1.0, symbol="GBPUSD")])
