@@ -1,11 +1,8 @@
-"""Window encoding, pgvector retrieval, and the point-in-time rules governing both.
+"""Window encoding, pgvector retrieval, and point-in-time rules governing both.
 
-`window_spec` fixes the encoding layout and is what makes the `vector(128)` in the schema a
-consequence of a specification rather than a guess. The encoder that fills that layout is not
-here yet — it needs the session clock from `fxagent.regime` for the session one-hot.
-
-Retrieval itself lives in `fxagent.store.repositories.windows`, where it can enforce the
-resolved-outcome filter next to the query it applies to.
+``window_spec`` fixes the vector(128) layout and ``encoder.encode_window`` fills it from a
+bounded, point-in-time bar window. Retrieval lives in the windows repository, where the
+resolved-outcome filter is enforced next to its query.
 """
 
 from __future__ import annotations
