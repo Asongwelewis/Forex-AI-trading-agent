@@ -39,6 +39,7 @@ __all__ = [
     "fill",
     "rollover_nights",
     "swap_cost",
+    "swap_per_lot_from_points",
 ]
 
 #: Exness rolls at 21:00 server time and its server clock is UTC — measured, see CLAUDE.md. A
@@ -48,6 +49,10 @@ ROLLOVER_HOUR_UTC: Final = 21
 
 #: Wednesday. Spot FX settles T+2, so the position rolled on Wednesday night carries its value
 #: date over the weekend and is charged three nights. Monday is 0, so Wednesday is 2.
+#:
+#: Confirmed against the live terminal on 18 Aug 2026: `symbol_info().swap_rollover3days` is 3
+#: on every Exness symbol checked, and MT5's DAY_OF_WEEK counts Sunday as 0 — so its 3 and this
+#: 2 are the same Wednesday in two different enums, not a discrepancy.
 TRIPLE_SWAP_WEEKDAY: Final = 2
 
 
@@ -80,14 +85,37 @@ class Quote:
         return self.bid is not None and self.ask is not None and self.ask >= self.bid
 
 
+def swap_per_lot_from_points(swap_points: float, tick_value: float) -> float:
+    """Convert a terminal swap quote in **points** into account currency per lot per night.
+
+    Exness quotes swap in points — `symbol_info().swap_mode` is 1 (`SYMBOL_SWAP_MODE_POINTS`)
+    on every symbol measured on 18 Aug 2026 — while `CostConfig` holds account currency. Feeding
+    the raw point figure straight in would understate EURUSD swap by a factor of about six and
+    USDJPY by about sixteen, silently, in the direction that flatters a backtest.
+
+    `trade_tick_value` is what one point of movement on one lot is worth in the deposit currency,
+    which is exactly the conversion needed and already accounts for a profit currency that is not
+    the account currency. Measured EURUSD: -5.8 points at a tick value of 1.0 is -$5.80.
+
+    **The mode is not assumed.** Read `symbol_info().swap_mode` before using this; a broker
+    quoting mode 4 (`CURRENCY_DEPOSIT`) reports account currency already and must not be
+    converted twice.
+    """
+    return swap_points * tick_value
+
+
 @dataclass(frozen=True)
 class CostConfig:
     """What the broker charges. The defaults are deliberately not free.
 
-    `swap_long_per_lot` and `swap_short_per_lot` are account currency per lot per night, signed
-    the way a broker quotes them: negative is a debit. They default to zero because a wrong swap
-    number is worse than an absent one — a carry strategy sized against an invented rate is
-    being backtested against a fiction — and `swap_is_configured` lets a report say so out loud.
+    `swap_long_per_lot` and `swap_short_per_lot` are **account currency** per lot per night,
+    signed the way a broker quotes them: negative is a debit. They default to zero because a
+    wrong swap number is worse than an absent one — a carry strategy sized against an invented
+    rate is being backtested against a fiction — and `swap_is_configured` lets a report say so.
+
+    **Not points.** Exness reports swap in points (`swap_mode` 1); pass the terminal figure
+    through `swap_per_lot_from_points` first. The two units differ by roughly six times on
+    EURUSD, in the direction that makes a backtest look better.
     """
 
     fixed_spread_pips: float = 1.0

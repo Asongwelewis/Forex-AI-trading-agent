@@ -108,13 +108,18 @@ class TestTrading:
         assert len(result.trades) == 1
         assert result.trades[0].direction is SignalDirection.LONG
 
-    def test_a_lone_strategy_never_trades(self) -> None:
-        """Consensus needs two. The loop must not be a way round that."""
+    def test_a_lone_weighted_sleeve_trades(self) -> None:
+        """Inverted when agreement was removed, and this is the whole point of the change.
+
+        This test used to assert that one strategy could never trade. That rule produced zero
+        trades in 12,341 decisions on real 2024-25 data, because the router never weights two
+        sleeves at once. One weighted sleeve is now sufficient.
+        """
         scripted = ScriptedStrategy("session_breakout", {160})
         result = replay(
             rising(200), CONFIG, strategies={scripted.name: scripted}, router=OPEN_ROUTER
         )
-        assert result.fired == 0
+        assert result.fired == 1
 
     def test_only_one_position_runs_at_a_time(self) -> None:
         """Signals arriving mid-trade are counted as skipped, never stacked."""

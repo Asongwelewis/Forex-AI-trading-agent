@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 from fxagent.adapters.base import UtcDatetime
 from fxagent.patterns import CONTEXT_ONLY, PatternHit
 from fxagent.regime.classifier import Regime
-from fxagent.regime.consensus import ConsensusResult
+from fxagent.regime.selection import SelectionResult
 from fxagent.strategies.base import SignalDirection
 
 __all__ = [
@@ -383,7 +383,7 @@ class AgentEcho(_Document):
 class Briefing(_Document):
     """Everything an agent is shown about one evaluation of one symbol.
 
-    Built by `from_consensus` from the two objects the deterministic core already produced, so
+    Built by `from_selection` from the two objects the deterministic core already produced, so
     there is no third description of a decision to keep in step with the other two.
 
     `indicators` and `patterns` are passed in rather than computed here. The briefing is a
@@ -408,12 +408,15 @@ class Briefing(_Document):
     fired: bool = False
     reason: str = ""
     winning_direction: str | None = None
-    long_weight: float = 0.0
-    long_votes: int = 0
-    short_weight: float = 0.0
-    short_votes: int = 0
-    min_total_weight: float = 0.0
-    min_agreeing: int = 0
+    #: The sleeve the router selected, and the weight it carried. Replaces the LONG/SHORT vote
+    #: tallies, which counted agreement between strategies that never agreed — see
+    #: `fxagent.regime.selection`.
+    selected_sleeve: str | None = None
+    sleeve_weight: float = 0.0
+    min_weight: float = 0.0
+    min_confidence: float = 0.0
+    #: What the daily directional bias did to the selected signal, verbatim from the filter.
+    bias_action: str = ""
 
     plan: TradePlan | None = None
     analogues: tuple[AnalogueBrief, ...] = ()
@@ -443,10 +446,10 @@ class Briefing(_Document):
     risk_flags: tuple[RiskFlag, ...] = ()
 
     @classmethod
-    def from_consensus(
+    def from_selection(
         cls,
         regime: Regime,
-        result: ConsensusResult,
+        result: SelectionResult,
         *,
         analogues: Sequence[AnalogueBrief] = (),
         indicators: Mapping[str, float | None] | None = None,
@@ -505,12 +508,11 @@ class Briefing(_Document):
             fired=bool(diagnostics.get("fired", result.fired)),
             reason=str(diagnostics.get("reason", "")),
             winning_direction=diagnostics.get("winning_direction"),
-            long_weight=float(diagnostics.get("long_weight", 0.0)),
-            long_votes=int(diagnostics.get("long_votes", 0)),
-            short_weight=float(diagnostics.get("short_weight", 0.0)),
-            short_votes=int(diagnostics.get("short_votes", 0)),
-            min_total_weight=float(diagnostics.get("min_total_weight", 0.0)),
-            min_agreeing=int(diagnostics.get("min_agreeing", 0)),
+            selected_sleeve=diagnostics.get("selected_sleeve"),
+            sleeve_weight=float(result.signal.total_weight if result.signal is not None else 0.0),
+            min_weight=float(diagnostics.get("min_weight", 0.0)),
+            min_confidence=float(diagnostics.get("min_confidence", 0.0)),
+            bias_action=str((diagnostics.get("bias_filter") or {}).get("action", "")),
             plan=plan,
             analogues=tuple(analogues),
             indicators=dict(indicators or {}),
@@ -565,12 +567,11 @@ class Briefing(_Document):
                 "fired": self.fired,
                 "reason": self.reason,
                 "winning_direction": self.winning_direction,
-                "long_weight": _round(self.long_weight),
-                "long_votes": self.long_votes,
-                "short_weight": _round(self.short_weight),
-                "short_votes": self.short_votes,
-                "min_total_weight": _round(self.min_total_weight),
-                "min_agreeing": self.min_agreeing,
+                "selected_sleeve": self.selected_sleeve,
+                "sleeve_weight": _round(self.sleeve_weight),
+                "min_weight": _round(self.min_weight),
+                "min_confidence": _round(self.min_confidence),
+                "bias_action": self.bias_action,
             },
             "plan": (
                 None

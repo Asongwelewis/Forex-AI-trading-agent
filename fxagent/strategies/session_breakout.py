@@ -65,6 +65,11 @@ ATR_PERIOD = 14
 #: Stop distance ceiling. The range's far side is used instead whenever it is nearer.
 ATR_STOP_MULTIPLE = 1.5
 #: Target distance as a multiple of the risk actually taken.
+#: How far into its own range the breakout bar must close, measured from the far end. 0.6
+#: means the close sits in the top 40% of the bar for a long. Below this the bar poked outside
+#: and came back, which is a false break — the thing a session-open breakout most often is.
+MIN_CLOSE_LOCATION = 0.6
+
 REWARD_RISK = 2.0
 
 #: Two days of H1. The ATR warm-up needs 15 bars; the session logic needs the whole day.
@@ -93,6 +98,19 @@ def asian_range(bars: BarSeries, day: date) -> tuple[float, float] | None:
     if {bar.timestamp.hour for bar in session} != set(ASIAN_HOURS):
         return None
     return max(bar.high for bar in session), min(bar.low for bar in session)
+
+
+def _close_location(bar: Bar, direction: SignalDirection) -> float:
+    """Where the bar closed within its own range, from 0 (worst end) to 1 (best end).
+
+    A doji with no range returns 0.5 — undecided rather than confirmed, which is the honest
+    reading of a bar that did not move.
+    """
+    span = bar.high - bar.low
+    if span <= 0.0:
+        return 0.5
+    position = (bar.close - bar.low) / span
+    return position if direction is SignalDirection.LONG else 1.0 - position
 
 
 class SessionBreakout(Strategy):
@@ -164,6 +182,17 @@ class SessionBreakout(Strategy):
             target = entry - REWARD_RISK * risk
             beyond = range_low - entry
 
+        # Second evidence family, and the sleeve's own confirmation. Cross-strategy agreement
+        # used to stand in for this and could not: a breakout and a mean-reversion sleeve look
+        # at different setups on different gates and were never two readings of one question.
+        # These two are. The break says price left the range; the close location says it left
+        # with conviction rather than wicking through and closing back. A bar that pokes
+        # outside and closes mid-range is the classic false break, and it is exactly what a
+        # range-bound session produces all morning.
+        conviction = _close_location(last, direction)
+        if conviction < MIN_CLOSE_LOCATION:
+            return None
+
         return Signal(
             symbol=bars.symbol,
             direction=direction,
@@ -186,6 +215,8 @@ class SessionBreakout(Strategy):
                 # the UTC hour makes a summer signal look an hour early forever after.
                 "breakout_hour_local": self._window.local_hour(last.timestamp),
                 "breakout_session": str(self._window.session),
+                "close_location": conviction,
+                "confirmation": "break + close location",
             },
         )
 

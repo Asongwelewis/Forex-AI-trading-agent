@@ -54,16 +54,16 @@ def test_a_silent_strategy_is_reported_with_the_cores_own_reason() -> None:
 def test_the_verdict_carries_the_thresholds_it_was_measured_against() -> None:
     text = templates.verdict_sentence(fired_briefing())
 
-    assert "Consensus fired LONG" in text
-    assert "1.60" in text  # the summed long weight
-    assert "2 agreeing strategies" in text
+    assert "The router selected session_breakout" in text
+    assert "0.50" in text  # the router-weight floor the sleeve was measured against
+    assert "router weight" in text
 
 
 def test_a_declined_verdict_quotes_why() -> None:
     briefing = declined_briefing()
 
     assert briefing.reason in templates.verdict_sentence(briefing)
-    assert "declined" in templates.verdict_sentence(briefing).lower()
+    assert "no sleeve was selected" in templates.verdict_sentence(briefing).lower()
 
 
 def test_the_plan_sentence_carries_the_levels_unrounded() -> None:

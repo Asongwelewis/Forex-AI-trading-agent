@@ -35,9 +35,10 @@ from typing import Final
 from fxagent.adapters.base import BarSeries, OrderSide
 from fxagent.backtest.barriers import Barrier, BarrierOutcome, resolve_barriers
 from fxagent.costs import CostConfig, Quote, SpreadSource, fill, swap_cost
+from fxagent.regime.bias import DirectionalBias
 from fxagent.regime.classifier import RegimeClassifier
-from fxagent.regime.consensus import Consensus
 from fxagent.regime.router import RegimeRouter
+from fxagent.regime.selection import SleeveSelector
 from fxagent.risk.sizing import RiskConfig, position_size
 from fxagent.risk.symbols import SymbolSpec
 from fxagent.stats.returns import r_multiple
@@ -243,7 +244,8 @@ def replay(
     strategies: dict[str, Strategy] | None = None,
     classifier: RegimeClassifier | None = None,
     router: RegimeRouter | None = None,
-    consensus: Consensus | None = None,
+    selector: SleeveSelector | None = None,
+    bias: DirectionalBias | None = None,
 ) -> ReplayResult:
     """Walk the series bar by bar, running the real pipeline at each step.
 
@@ -263,7 +265,7 @@ def replay(
     excluded = tuple(name for name in default_strategies() if name not in engine_strategies)
     classifier = classifier or RegimeClassifier()
     router = router or RegimeRouter()
-    consensus = consensus or Consensus()
+    selector = selector or SleeveSelector()
     quote_map = quotes or {}
 
     warmup = max([classifier.required_bars, *(s.required_bars for s in engine_strategies.values())])
@@ -287,7 +289,7 @@ def replay(
                 for name, strategy in engine_strategies.items()
             }
             decisions += 1
-            if consensus.evaluate(regime, signals, weights).fired:
+            if selector.select(regime, signals, weights, bias=bias).fired:
                 skipped += 1
             continue
 
@@ -301,7 +303,7 @@ def replay(
         carry_voted = carry_voted or signals.get("carry_divergence") is not None
         decisions += 1
 
-        outcome = consensus.evaluate(regime, signals, weights)
+        outcome = selector.select(regime, signals, weights, bias=bias)
         if not outcome.fired or outcome.signal is None:
             continue
 

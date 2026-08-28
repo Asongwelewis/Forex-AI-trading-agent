@@ -20,7 +20,7 @@ from fxagent.agents.schemas import (
     SpreadState,
 )
 from fxagent.patterns import PatternHit
-from fxagent.regime.consensus import Consensus
+from fxagent.regime.selection import SleeveSelector
 from fxagent.strategies.base import SignalDirection
 from tests.regime.builders import SYMBOL, regime_at, signal
 
@@ -57,8 +57,8 @@ def analogue(
 
 def _briefing(signals: dict[str, object], **kwargs: object) -> Briefing:
     regime = regime_at(MOMENT, trend_strength=30.0, volatility_percentile=62.0)
-    result = Consensus().evaluate(regime, signals, WEIGHTS)  # type: ignore[arg-type]
-    return Briefing.from_consensus(regime, result, **kwargs)  # type: ignore[arg-type]
+    result = SleeveSelector().select(regime, signals, WEIGHTS)  # type: ignore[arg-type]
+    return Briefing.from_selection(regime, result, **kwargs)  # type: ignore[arg-type]
 
 
 def fired_briefing(
@@ -70,7 +70,7 @@ def fired_briefing(
     spread: SpreadState | None = None,
     events: tuple[CalendarEventBrief, ...] = (),
 ) -> Briefing:
-    """Two strategies agree LONG on summed weight 1.60, clearing both thresholds.
+    """The breakout sleeve is selected at weight 1.00 and trades its own levels whole.
 
     Reversion disagrees *and* is weighted 0.0, so the briefing carries a gated dissent. A
     firing bar where every strategy happened to agree would not show whether the narration can
@@ -92,10 +92,16 @@ def fired_briefing(
 
 
 def declined_briefing() -> Briefing:
-    """One strategy votes, one is gated, one is silent — so nothing qualifies."""
+    """The only sleeve with a setup is the one the router gated, so nothing is selectable.
+
+    Rewritten when agreement was removed. It used to rely on a lone LONG vote failing a
+    two-of-three threshold; under the sleeve model that vote simply trades, which is the whole
+    point of the change. A decline now means what it says — the router did not permit the sleeve
+    that had something to say.
+    """
     return _briefing(
         {
-            BREAKOUT: signal(BREAKOUT, SignalDirection.LONG, timestamp=MOMENT, confidence=0.7),
+            BREAKOUT: None,
             CARRY: None,
             REVERSION: signal(REVERSION, SignalDirection.SHORT, timestamp=MOMENT),
         }

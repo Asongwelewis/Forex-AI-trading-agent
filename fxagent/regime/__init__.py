@@ -12,20 +12,27 @@ which is what makes a replayed backtest agree with the live run.
 
 from __future__ import annotations
 
-from fxagent.regime.classifier import ClassifierConfig, Regime, RegimeClassifier
-from fxagent.regime.consensus import (
-    Consensus,
-    ConsensusConfig,
-    ConsensusResult,
-    ConsensusSignal,
-    Contribution,
+from fxagent.regime.bias import (
+    BiasMode,
+    BiasPolicy,
+    DirectionalBias,
+    apply_bias,
+    carry_bias,
 )
+from fxagent.regime.classifier import ClassifierConfig, Regime, RegimeClassifier
 from fxagent.regime.router import (
     CARRY_DIVERGENCE,
     RANGE_REVERSION,
     SESSION_BREAKOUT,
     RegimeRouter,
     RouterConfig,
+)
+from fxagent.regime.selection import (
+    Contribution,
+    SelectedSignal,
+    SelectionConfig,
+    SelectionResult,
+    SleeveSelector,
 )
 from fxagent.regime.sessions import (
     LONDON_MORNING,
@@ -42,16 +49,21 @@ from fxagent.regime.sessions import (
 )
 
 __all__ = [
+    "BiasMode",
+    "BiasPolicy",
+    "DirectionalBias",
+    "apply_bias",
+    "carry_bias",
     "CARRY_DIVERGENCE",
     "LONDON_MORNING",
     "RANGE_REVERSION",
     "SESSION_BREAKOUT",
     "SESSION_WINDOWS",
     "ClassifierConfig",
-    "Consensus",
-    "ConsensusConfig",
-    "ConsensusResult",
-    "ConsensusSignal",
+    "SleeveSelector",
+    "SelectionConfig",
+    "SelectionResult",
+    "SelectedSignal",
     "Contribution",
     "Regime",
     "RegimeClassifier",

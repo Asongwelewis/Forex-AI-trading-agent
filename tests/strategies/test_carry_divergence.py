@@ -18,7 +18,6 @@ from fxagent.strategies.carry_divergence import CarryDivergence
 from tests.strategies.builders import (
     daily_series,
     falling_daily,
-    h1_series,
     rising_daily,
 )
 
@@ -179,10 +178,16 @@ def test_exactly_enough_history_is_enough() -> None:
     assert strategy.generate(bars, POSITIVE_CARRY) is not None
 
 
-def test_an_intraday_series_is_a_wiring_error() -> None:
-    hourly = h1_series(list(rising_daily(BARS)), timeframe="H1")
-    with pytest.raises(ValueError, match="reads D1 bars"):
-        CarryDivergence().generate(hourly, POSITIVE_CARRY)
+def test_an_intraday_series_is_declined_rather_than_raised() -> None:
+    """It used to raise. It is now a D1 bias filter the intraday path asks on every bar.
+
+    A filter that throws on the common case has to be wrapped in a try, and a filter wrapped in
+    a try is a filter that ends up silently absent. It never originates a signal off D1 and it
+    never raises there either — see `fxagent.regime.bias`.
+    """
+    strategy = CarryDivergence()
+    bars = daily_series(rising_daily(BARS)).model_copy(update={"timeframe": "H1"})
+    assert strategy.generate(bars, POSITIVE_CARRY) is None
 
 
 def test_required_bars_covers_the_ema_seed_plus_a_slope() -> None:

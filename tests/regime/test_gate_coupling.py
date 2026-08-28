@@ -35,7 +35,12 @@ LAST_BAR = datetime(2026, 1, 5, 9, tzinfo=UTC)
 
 #: A flat run scores ADX 0; the single spike lifts it to 100/14, and stretches the z-score
 #: well past its trigger at the same time. One fixture, both conditions.
-SPIKE = {"open_": 1.1000, "high": 1.1060, "low": 1.0999, "close": 1.1050}
+#:
+#: The close sits well below the high on purpose. `range_reversion` now requires its own
+#: rejection wick as a second evidence family, so a bar closing on its high is declined by the
+#: strategy however the router is configured — which would break the coupling this file
+#: measures without saying anything about the ADX threshold it is actually testing.
+SPIKE = {"open_": 1.1000, "high": 1.1060, "low": 1.0999, "close": 1.1040}
 SPIKE_ADX = 100.0 / 14.0
 
 

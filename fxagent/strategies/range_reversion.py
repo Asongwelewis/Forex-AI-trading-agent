@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from fxagent.adapters.base import BarSeries
+from fxagent.adapters.base import Bar, BarSeries
 from fxagent.indicators import atr, rolling_zscore
 from fxagent.strategies.base import (
     MarketContext,
@@ -46,10 +46,28 @@ ZSCORE_TRIGGER = 2.0
 
 ATR_PERIOD = 14
 #: Stop distance beyond the current bar's extreme.
+#: How much of the bar's range must sit beyond its close, on the side the stretch came from.
+#: 0.25 means a quarter of the bar is rejection wick. Below that the bar is still going.
+MIN_REJECTION = 0.25
+
 ATR_STOP_MULTIPLE = 1.5
 
 #: Denominator that maps |z| onto confidence: the trigger scores 0.5, twice it scores 1.
 CONFIDENCE_SCALE = 2.0 * ZSCORE_TRIGGER
+
+
+def _rejection_fraction(bar: Bar, direction: SignalDirection) -> float:
+    """Share of the bar's range left as a wick against the stretch, 0 to 1.
+
+    Shorting an overstretched bar wants an upper wick: price went higher and came back. A bar
+    closing on its high has rejected nothing and the move is still running. A zero-range bar
+    returns 0.0 — no evidence, which is not the same as evidence of continuation.
+    """
+    span = bar.high - bar.low
+    if span <= 0.0:
+        return 0.0
+    wick = bar.high - bar.close if direction is SignalDirection.SHORT else bar.close - bar.low
+    return wick / span
 
 
 class RangeReversion(Strategy):
@@ -119,6 +137,16 @@ class RangeReversion(Strategy):
         if abs(entry - stop) <= 0.0:
             return None
 
+        # Second evidence family, and the sleeve's own confirmation. The z-score says price is
+        # stretched; the rejection wick says the stretch is being sold rather than continuing.
+        # Stretch alone is what makes a mean-reversion sleeve short a trend all the way up — it
+        # is a measure of how far, never of whether it has stopped. Requiring the bar to close
+        # back off its own extreme is the cheapest independent read of that, and it is
+        # independent of the z-score in a way another strategy's opinion never was.
+        rejection = _rejection_fraction(last, direction)
+        if rejection < MIN_REJECTION:
+            return None
+
         return Signal(
             symbol=bars.symbol,
             direction=direction,
@@ -130,6 +158,8 @@ class RangeReversion(Strategy):
             timestamp=last.timestamp,
             reasoning={
                 "zscore": float(stretch),
+                "rejection_fraction": rejection,
+                "confirmation": "zscore + rejection wick",
                 "rolling_mean": float(mean),
                 # Recorded from the regime, not measured here — so the journal shows the
                 # number the gate was actually taken on.

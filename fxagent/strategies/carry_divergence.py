@@ -79,10 +79,13 @@ class CarryDivergence(Strategy):
         """`regime` is accepted and ignored: this strategy gates on the rate differential
         and its own EMA slope, neither of which the classifier measures."""
         if bars.timeframe != TIMEFRAME:
-            raise ValueError(
-                f"{self.name} reads {TIMEFRAME} bars; got {bars.timeframe!r}. Carry is a "
-                "multi-day hold and must not be judged on an intraday series."
-            )
+            # Silent, not an exception. This used to raise, which was defensible while carry was
+            # a voter that nobody would ever hand an H1 series to. It is now a D1 directional
+            # bias filter (`regime.bias`) that the intraday path consults on every bar, and a
+            # filter that throws on the common case has to be wrapped in a try — which is how a
+            # filter ends up silently absent. It never originates a signal off D1, and it never
+            # raises there either.
+            return None
         if not self._has_enough_history(bars):
             return None
 

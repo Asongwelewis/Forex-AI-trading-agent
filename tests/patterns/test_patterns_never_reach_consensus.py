@@ -1,13 +1,13 @@
-"""`consensus.py` must not be able to see a candle formation. Enforced by import, not by review.
+"""`selection.py` must not be able to see a candle formation. Enforced by import, not by review.
 
 Two studies found candlestick formations produce no net positive return on EUR/USD after costs.
-CLAUDE.md marks the package "CONTEXT ONLY — must not reach consensus.py" for that reason: a
+CLAUDE.md marks the package "CONTEXT ONLY — must not reach selection.py" for that reason: a
 formation that reached the vote would put a measured-worthless input into the one calculation
 that decides whether money moves.
 
-**The check is transitive.** A direct `import fxagent.patterns` in `consensus.py` is the version
+**The check is transitive.** A direct `import fxagent.patterns` in `selection.py` is the version
 of this mistake nobody makes. The one that happens is three commits later, when a helper module
-consensus already imports grows a formation lookup — and a test that only read consensus.py's
+consensus already imports grows a formation lookup — and a test that only read selection.py's
 own import list would stay green through it. So the closure is walked, and the whole of
 `fxagent.regime` is checked rather than consensus alone: the router deciding which strategies
 may speak is as much the decision path as the tally that follows it.
@@ -26,7 +26,7 @@ import fxagent.regime
 
 PACKAGE_ROOT = Path(fxagent.__file__).parent
 REGIME = Path(fxagent.regime.__file__).parent
-CONSENSUS = REGIME / "consensus.py"
+CONSENSUS = REGIME / "selection.py"
 
 #: The decision path. Nothing under here may reach a formation, directly or through anything it
 #: imports. `strategies` is included because a strategy's signal is what consensus counts.
@@ -97,10 +97,10 @@ def test_the_files_under_test_exist() -> None:
     assert (PACKAGE_ROOT / "patterns" / "__init__.py").is_file(), "fxagent.patterns is missing"
 
 
-def test_consensus_does_not_import_patterns() -> None:
+def test_selection_does_not_import_patterns() -> None:
     """The requirement, stated directly."""
     assert FORBIDDEN not in _imported_modules(CONSENSUS), (
-        "consensus.py imports fxagent.patterns. Candle formations are display context — two "
+        "selection.py imports fxagent.patterns. Candle formations are display context — two "
         "studies found no net positive return on EUR/USD after costs — and must never enter "
         "the consensus score."
     )
@@ -111,7 +111,7 @@ def test_consensus_cannot_reach_patterns_through_anything_it_imports() -> None:
     reachable = _closure(CONSENSUS)
     offending = sorted(name for name in reachable if name.startswith(FORBIDDEN))
     assert not offending, (
-        f"consensus.py can reach {offending} through its imports. The formations must stay "
+        f"selection.py can reach {offending} through its imports. The formations must stay "
         "unreachable from the decision path, not merely unimported by one file."
     )
 
@@ -130,7 +130,7 @@ def test_no_module_on_the_decision_path_reaches_patterns(path: Path) -> None:
 def test_the_closure_walker_actually_walks() -> None:
     """Guards the guard again: a `_closure` that returned nothing would pass every test above.
 
-    `consensus.py` imports `strategies.base` directly and `adapters.base` only through it, so
+    `selection.py` imports `strategies.base` directly and `adapters.base` only through it, so
     finding the second proves the walk followed an edge rather than reading one import list.
     """
     reachable = _closure(CONSENSUS)

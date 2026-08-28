@@ -291,10 +291,10 @@ def test_the_rendered_prompt_is_stable_across_calls() -> None:
 def test_float_noise_never_reaches_the_prompt() -> None:
     """A price of 1.0999999999999999 in a prompt is also 1.1 being ungrounded when quoted."""
     briefing = Briefing(
-        symbol="EURUSD", timestamp=fired_briefing().timestamp, long_weight=0.1 + 0.2
+        symbol="EURUSD", timestamp=fired_briefing().timestamp, sleeve_weight=0.1 + 0.2
     )
 
-    assert briefing.payload()["decision"]["long_weight"] == 0.3
+    assert briefing.payload()["decision"]["sleeve_weight"] == 0.3
 
 
 # -- the chartist's structured input -------------------------------------------------------

@@ -47,6 +47,7 @@ __all__ = [
     "bars",
     "cot_reports",
     "service_heartbeats",
+    "spread_samples",
     "evaluations",
     "events",
     "metadata",
@@ -231,4 +232,26 @@ cot_reports = Table(
     UniqueConstraint("contract_code", "report_date", name="cot_reports_unique"),
     Index("cot_reports_currency_date_idx", "currency", "report_date"),
     Index("cot_reports_published_idx", "published_at"),
+)
+
+
+#: Measured dealing conditions during the London open. Read by the spread study, and by nothing
+#: in the analysis pipeline — a spread sample has no publication time and no bar behind it, so it
+#: must not become an input the way `bars` is. See migration 0012.
+spread_samples = Table(
+    "spread_samples",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("symbol", Text, nullable=False),
+    Column("broker_symbol", Text, nullable=False),
+    _utc_column("sampled_at", nullable=False),
+    Column("bid", Float, nullable=False),
+    Column("ask", Float, nullable=False),
+    Column("spread_points", Integer, nullable=False),
+    Column("point", Float, nullable=False),
+    Column("spread_float", Boolean, nullable=False),
+    Column("source", Text, nullable=False),
+    _utc_column("ingested_at", nullable=False),
+    UniqueConstraint("broker_symbol", "sampled_at", "source", name="spread_samples_unique"),
+    Index("spread_samples_symbol_time_idx", "symbol", "sampled_at"),
 )

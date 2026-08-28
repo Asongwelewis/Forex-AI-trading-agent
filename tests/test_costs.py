@@ -21,6 +21,7 @@ from fxagent.costs import (
     fill,
     rollover_nights,
     swap_cost,
+    swap_per_lot_from_points,
 )
 from fxagent.risk.symbols import SymbolSpec
 
@@ -147,3 +148,26 @@ class TestSwap:
         window = (at(TUESDAY, 20), at(TUESDAY, 22))
         assert swap_cost(OrderSide.BUY, 1.0, *window, config) == pytest.approx(-7.0)
         assert swap_cost(OrderSide.SELL, 1.0, *window, config) == pytest.approx(2.0)
+
+
+class TestSwapUnits:
+    """Exness quotes swap in points; `CostConfig` holds account currency. They differ ~6x."""
+
+    def test_points_convert_through_the_tick_value(self) -> None:
+        """Measured EURUSD, 18 Aug 2026: -5.8 points at a tick value of 1.0 is -$5.80."""
+        assert swap_per_lot_from_points(-5.8, 1.0) == pytest.approx(-5.80)
+
+    def test_a_yen_pair_converts_by_its_own_tick_value(self) -> None:
+        """Measured USDJPY: -15.6 points at a tick value of 0.6266 is -$9.77, not -$15.60."""
+        assert swap_per_lot_from_points(-15.6, 0.6265546386972676) == pytest.approx(
+            -9.774, abs=1e-3
+        )
+
+    def test_the_raw_point_figure_would_overstate_the_charge(self) -> None:
+        """The failure this exists to prevent, stated as a comparison."""
+        converted = swap_per_lot_from_points(-15.6, 0.6265546386972676)
+        assert abs(converted) < abs(-15.6)
+
+    def test_a_zero_swap_converts_to_zero(self) -> None:
+        """Measured EURUSD short side is exactly 0.0 — no credit, and no debit either."""
+        assert swap_per_lot_from_points(0.0, 1.0) == 0.0

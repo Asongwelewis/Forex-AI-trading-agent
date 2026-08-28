@@ -142,19 +142,28 @@ def votes_sentence(briefing: Briefing) -> str:
 
 
 def verdict_sentence(briefing: Briefing) -> str:
-    """What consensus concluded, with the thresholds it was measured against."""
-    tally = (
-        f"LONG carried {_fmt(briefing.long_weight)} across {briefing.long_votes} vote(s) and "
-        f"SHORT carried {_fmt(briefing.short_weight)} across {briefing.short_votes}, against a "
-        f"bar of {_fmt(briefing.min_total_weight)} summed weight and {briefing.min_agreeing} "
-        f"agreeing strategies"
-    )
+    """What the router selected, with the threshold it was measured against.
+
+    No vote tally any more. Strategies are independent sleeves and the router picks one, so
+    "LONG carried 1.60 across 2 votes" describes a mechanism that no longer exists — and
+    described one that never fired even when it did.
+    """
     if briefing.fired:
-        headline = f"Consensus fired {direction_word(briefing.winning_direction).upper()}"
+        headline = (
+            f"The router selected {briefing.selected_sleeve} at weight "
+            f"{_fmt(briefing.sleeve_weight)}, pointing "
+            f"{direction_word(briefing.winning_direction).upper()}"
+        )
     else:
-        headline = "Consensus declined"
-    reason = f" — {briefing.reason}" if briefing.reason else ""
-    return f"{headline}{reason}. {tally}."
+        headline = "No sleeve was selected"
+    tally = f"the floor is {_fmt(briefing.min_weight)} router weight"
+    if briefing.bias_action:
+        tally += f"; daily bias {briefing.bias_action}"
+    # The firing headline already names the sleeve, its weight and the bias outcome, and
+    # `reason` restates them word for word. Repeating it pushed the plan sentence out of the
+    # card's character budget, which is how a trade's levels vanish from a narration.
+    reason = "" if briefing.fired else (f" — {briefing.reason}" if briefing.reason else "")
+    return f"{headline}{reason}. {tally.capitalize()}."
 
 
 def plan_sentence(briefing: Briefing) -> str:
@@ -189,9 +198,12 @@ def explain(briefing: Briefing) -> str:
 def verdict_headline(briefing: Briefing) -> str:
     """The verdict without the threshold tally — what fits on a card beside the vote list."""
     if briefing.fired:
-        headline = f"Consensus fired {direction_word(briefing.winning_direction).upper()}"
+        headline = (
+            f"Selected {briefing.selected_sleeve} "
+            f"{direction_word(briefing.winning_direction).upper()}"
+        )
     else:
-        headline = "Consensus declined"
+        headline = "No sleeve selected"
     return f"{headline}{f' — {briefing.reason}' if briefing.reason else ''}."
 
 

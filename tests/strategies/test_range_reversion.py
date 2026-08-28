@@ -41,8 +41,12 @@ EXPECTED_ABS_Z = 0.95 / math.sqrt(0.05)
 RANGING = 10.0
 TRENDING = 30.0
 
-SPIKE_UP = {"open_": 1.1000, "high": 1.1060, "low": 1.0999, "close": 1.1050}
-SPIKE_DOWN = {"open_": 1.1000, "high": 1.1001, "low": 1.0940, "close": 1.0950}
+#: The closes sit well off the extremes on purpose: the sleeve now requires its own rejection
+#: wick as a second evidence family, so a bar closing on its high has stretched without being
+#: sold and is declined. The high, low and therefore the true range are unchanged, so every
+#: ATR expectation below still holds.
+SPIKE_UP = {"open_": 1.1000, "high": 1.1060, "low": 1.0999, "close": 1.1020}
+SPIKE_DOWN = {"open_": 1.1000, "high": 1.1001, "low": 1.0940, "close": 1.0980}
 
 
 def _spiked(shape: dict[str, float], *, count: int = 40) -> BarSeries:
@@ -86,7 +90,7 @@ def test_a_stretch_above_the_mean_is_faded_short() -> None:
 
     assert signal is not None
     assert signal.direction is SignalDirection.SHORT
-    assert signal.entry_price == pytest.approx(1.1050)
+    assert signal.entry_price == pytest.approx(1.1020)
     assert signal.reasoning["zscore"] == pytest.approx(EXPECTED_ABS_Z)
     assert signal.reasoning["atr"] == pytest.approx(EXPECTED_ATR)
 
@@ -106,7 +110,7 @@ def test_a_stretch_below_the_mean_is_faded_long() -> None:
 
     assert signal is not None
     assert signal.direction is SignalDirection.LONG
-    assert signal.entry_price == pytest.approx(1.0950)
+    assert signal.entry_price == pytest.approx(1.0980)
     assert signal.reasoning["zscore"] == pytest.approx(-EXPECTED_ABS_Z)
 
 
@@ -148,13 +152,13 @@ def test_stop_is_always_on_the_losing_side_of_entry(
 
 
 def test_the_target_is_the_rolling_mean_it_is_reverting_to() -> None:
-    """19 closes at 1.1000 and one at 1.1050 average to exactly 1.10025."""
+    """19 closes at 1.1000 and one at 1.1020 average to exactly 1.1001."""
     bars = _spiked(SPIKE_UP)
     signal = RangeReversion().generate(bars, CONTEXT, _regime(bars))
 
     assert signal is not None
-    assert signal.take_profit == pytest.approx(1.10025)
-    assert signal.reasoning["rolling_mean"] == pytest.approx(1.10025)
+    assert signal.take_profit == pytest.approx(1.1001)
+    assert signal.reasoning["rolling_mean"] == pytest.approx(1.1001)
 
 
 # --- it refuses ----------------------------------------------------------------
