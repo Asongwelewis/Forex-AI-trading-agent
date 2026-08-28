@@ -10,6 +10,7 @@ resolved-outcome filter next to the query it applies to.
 
 from __future__ import annotations
 
+from fxagent.memory.encoder import encode_window
 from fxagent.memory.window_spec import (
     BARS_PER_SEGMENT,
     BLOCKS,
@@ -36,4 +37,5 @@ __all__ = [
     "Block",
     "block_for",
     "summary_index",
+    "encode_window",
 ]
