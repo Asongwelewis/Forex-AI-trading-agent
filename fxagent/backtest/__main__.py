@@ -19,6 +19,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from fxagent.backtest.folds import purged_walk_forward
 from fxagent.backtest.replay import DEFAULT_SOURCE, ReplayConfig, ReplayResult, replay
 from fxagent.backtest.report import build_report
@@ -170,6 +172,7 @@ async def run(arguments: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     arguments = build_parser().parse_args(argv)
     logging.basicConfig(level=arguments.log_level, format="%(levelname)s %(name)s: %(message)s")
     return asyncio.run(run(arguments))
