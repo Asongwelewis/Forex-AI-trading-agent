@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import time
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -50,6 +51,13 @@ logger = logging.getLogger("backfill")
 #: to match are one rename away from a backfill writing a series nothing reads.
 #: Gaps at or above this many missing in-market hours are listed individually.
 GAP_THRESHOLD_HOURS = 4
+
+#: How many times to ask for a month before accepting that it is genuinely empty. The first
+#: call for an uncached symbol/period fails and starts the download; two more is generous.
+FETCH_ATTEMPTS = 3
+
+#: Long enough for the terminal to pull a month of H1. Cheap: it only fires on a miss.
+FETCH_RETRY_SECONDS = 3.0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -99,14 +107,44 @@ def _fetch_month(
 
     offset = adapter.server_utc_offset
     period = getattr(mt5, f"TIMEFRAME_{timeframe}")
-    rates = mt5.copy_rates_range(
-        broker_symbol,
-        period,
-        (start + offset).replace(tzinfo=None),
-        (end + offset - timedelta(seconds=1)).replace(tzinfo=None),
-    )
-    if rates is None:
-        logger.warning("no rates for %s %s: %s", broker_symbol, start.date(), mt5.last_error())
+    date_from = (start + offset).replace(tzinfo=None)
+    date_to = (end + offset - timedelta(seconds=1)).replace(tzinfo=None)
+
+    # MT5 downloads history lazily. The first `copy_rates_range` for a symbol/period the
+    # terminal has not cached returns (-1, "Terminal: Call failed") and *starts* the download
+    # in the background; the same call a moment later succeeds. Measured 2026-08-28: a GBPUSD
+    # backfill lost January 2024 to exactly this, then fetched every following month cleanly,
+    # because the failed first call had warmed the cache.
+    #
+    # So a single attempt silently drops the first month of every symbol the user has not
+    # charted recently, which is the least likely month to be noticed missing.
+    rates = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        rates = mt5.copy_rates_range(broker_symbol, period, date_from, date_to)
+        if rates is not None and len(rates):
+            break
+        code, description = mt5.last_error()
+        if attempt < FETCH_ATTEMPTS:
+            logger.info(
+                "  %s %s: %s (%s) - retrying in %.0fs while the terminal downloads history",
+                broker_symbol,
+                start.date(),
+                description,
+                code,
+                FETCH_RETRY_SECONDS,
+            )
+            time.sleep(FETCH_RETRY_SECONDS)
+
+    if rates is None or not len(rates):
+        # Still empty after retries. Legitimate for a month before the broker's history
+        # starts; a defect if it is mid-range. `_report_coverage` decides which.
+        logger.warning(
+            "no rates for %s %s after %d attempts: %s",
+            broker_symbol,
+            start.date(),
+            FETCH_ATTEMPTS,
+            mt5.last_error(),
+        )
         return [], {}
 
     info = mt5.symbol_info(broker_symbol)
@@ -133,6 +171,41 @@ def _missing_in_market_hours(previous: datetime, following: datetime) -> list[da
             missing.append(slot)
         slot += timedelta(hours=1)
     return missing
+
+
+def _report_coverage(stamps: list[datetime], start: date, end: date) -> None:
+    """Compare what was asked for against what arrived at each END of the range.
+
+    `_report_gaps` only sees holes *between* stored bars, so a month missing from the start or
+    the end of the request is invisible to it — which is exactly how a GBPUSD backfill lost
+    January 2024 while reporting three clean Christmas gaps and nothing else.
+
+    A short range is not necessarily a defect: the broker's history has a real beginning. But
+    it must be *stated*, because a replay over a range that silently starts a month late is a
+    replay of a different experiment.
+    """
+    if not stamps:
+        return
+
+    first, last = stamps[0].date(), stamps[-1].date()
+    lead = (first - start).days
+    trail = (end - last).days
+
+    print("\n  requested range coverage")
+    print(f"    asked for  {start} .. {end}")
+    print(f"    received   {first} .. {last}")
+
+    # A few days at either end is the weekend and the FX week boundary, not a hole.
+    if lead > 3 or trail > 3:
+        print(
+            f"    WARNING: missing {max(lead, 0)}d at the start and {max(trail, 0)}d at the end."
+        )
+        print(
+            "    If this is not the start of the broker's history, re-run this command --\n"
+            "    MT5 downloads lazily and the retry may simply need another pass."
+        )
+    else:
+        print("    complete at both ends")
 
 
 def _report_gaps(stamps: list[datetime]) -> None:
@@ -213,6 +286,7 @@ async def main() -> None:
         print("  WARNING: most bars have no two-sided quote; fills fall back to config")
     print(f"  first {stamps[0]:%Y-%m-%d %H:%M} UTC   last {stamps[-1]:%Y-%m-%d %H:%M} UTC")
     _report_gaps(stamps)
+    _report_coverage(stamps, start, end)
 
 
 if __name__ == "__main__":
