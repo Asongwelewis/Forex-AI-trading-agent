@@ -197,9 +197,7 @@ def _report_coverage(stamps: list[datetime], start: date, end: date) -> None:
 
     # A few days at either end is the weekend and the FX week boundary, not a hole.
     if lead > 3 or trail > 3:
-        print(
-            f"    WARNING: missing {max(lead, 0)}d at the start and {max(trail, 0)}d at the end."
-        )
+        print(f"    WARNING: missing {max(lead, 0)}d at the start and {max(trail, 0)}d at the end.")
         print(
             "    If this is not the start of the broker's history, re-run this command --\n"
             "    MT5 downloads lazily and the retry may simply need another pass."
@@ -251,9 +249,7 @@ async def main() -> None:
         print(f"  {args.symbol} {timeframe} {start} .. {end} -> source={SOURCE!r}\n")
 
         for window_start, window_end in _months(start, end):
-            bars, quotes = _fetch_month(
-                adapter, broker_symbol, timeframe, window_start, window_end
-            )
+            bars, quotes = _fetch_month(adapter, broker_symbol, timeframe, window_start, window_end)
             if not bars:
                 print(f"  {window_start:%Y-%m}  {0:>5} bars")
                 continue
@@ -271,6 +267,11 @@ async def main() -> None:
                     series, source=SOURCE, quotes=quotes
                 )
             print(f"  {window_start:%Y-%m}  {len(bars):>5} bars  {cover}  written")
+
+    # Explicitly close the asyncpg engine. Without this, the script can finish its writes but
+    # keep the event loop alive behind a pooler connection, making a completed backfill look hung
+    # and preventing the next month/symbol job from starting reliably.
+    await database.dispose()
 
     if not collected:
         raise SystemExit("no bars returned at all; is the terminal logged in?")
