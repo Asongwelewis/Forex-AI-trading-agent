@@ -7,7 +7,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from fxagent.adapters.base import Bar, BarSeries
-from fxagent.adapters.divergence import Divergence, compare_series, interpret, pip_size
+from fxagent.adapters.divergence import (
+    Divergence,
+    compare_series,
+    gap_filler_verdict,
+    interpret,
+    pip_size,
+)
 
 BASE = datetime(2026, 3, 11, 12, 0, tzinfo=UTC)
 
@@ -106,3 +112,48 @@ def test_render_states_both_the_mean_and_the_worst_bar() -> None:
     assert "1.25 pips" in rendered
     assert "4.50 pips" in rendered
     assert "2026-03-11 12:00 UTC" in rendered
+
+
+def test_report_includes_ohlc_distributions_and_barrier_flip_share() -> None:
+    left = _series(count=2)
+    right = BarSeries(
+        symbol="EURUSD",
+        timeframe="H1",
+        bars=(
+            Bar(
+                timestamp=BASE,
+                open=1.0850,
+                high=1.0900,
+                low=1.0840,
+                close=1.0850,
+                volume=0,
+            ),
+            Bar(
+                timestamp=BASE + timedelta(hours=1),
+                open=1.0850,
+                high=1.0900,
+                low=1.0840,
+                close=1.0850,
+                volume=0,
+            ),
+        ),
+    )
+    result = compare_series("mt5", left, "twelvedata", right, barrier_pips=(5, 20))
+
+    assert len(result.ohlc_mean_abs_pips) == 4
+    assert len(result.ohlc_p95_abs_pips) == 4
+    assert result.barrier_touch_flip_share == pytest.approx(0.0)
+    assert "mean OHLC" in result.render()
+
+
+def test_gap_filler_verdict_rejects_barrier_flips() -> None:
+    divergence = Divergence(
+        "mt5",
+        "twelvedata",
+        10,
+        2.0,
+        3.0,
+        BASE,
+        barrier_touch_flip_share=0.2,
+    )
+    assert gap_filler_verdict(divergence).startswith("UNUSABLE")

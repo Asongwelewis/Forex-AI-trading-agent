@@ -139,6 +139,23 @@ class TestTrading:
 
 
 class TestCosts:
+    def test_measured_spread_ceiling_refuses_a_wide_entry(self) -> None:
+        bars = rising(200)
+        fire_bar = bars.bars[160]
+        quotes = {fire_bar.timestamp: (fire_bar.close - 0.0002, fire_bar.close + 0.0002)}
+        gated = ReplayConfig(
+            spec=CONFIG.spec,
+            risk=CONFIG.risk,
+            costs=CONFIG.costs,
+            history_bars=CONFIG.history_bars,
+            max_bars_held=CONFIG.max_bars_held,
+            spread_ceiling_pips=2.0,
+        )
+        result = run(bars, {160}, config=gated, quotes=quotes)
+        assert result.fired == 0
+        assert result.spread_refusals == 1
+        assert "spread-refused" in result.describe()
+
     def test_a_long_enters_above_the_bar_close(self) -> None:
         """Half the spread plus slippage, on the way in."""
         result = run(rising(200), {160})

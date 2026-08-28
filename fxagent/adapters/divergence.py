@@ -23,9 +23,9 @@ import statistics
 from dataclasses import dataclass
 from datetime import datetime
 
-from fxagent.adapters.base import BarSeries
+from fxagent.adapters.base import BarSeries, OrderSide
 
-__all__ = ["Divergence", "compare_series", "interpret"]
+__all__ = ["Divergence", "compare_series", "gap_filler_verdict", "interpret"]
 
 #: Feeds reading the same broker's book. Held to a much tighter standard than independent ones.
 SAME_BROKER_PAIRS = frozenset({frozenset({"mt5", "metaapi"})})
@@ -47,6 +47,13 @@ class Divergence:
     mean_abs_pips: float
     max_abs_pips: float
     worst_at: datetime | None = None
+    #: Mean absolute delta for open/high/low/close, in that order. Empty for old callers that
+    #: construct a Divergence directly rather than through :func:`compare_series`.
+    ohlc_mean_abs_pips: tuple[float, ...] = ()
+    #: 95th percentile absolute delta for open/high/low/close, in that order.
+    ohlc_p95_abs_pips: tuple[float, ...] = ()
+    #: Fraction of overlapping bars where the configured barrier touch differs between feeds.
+    barrier_touch_flip_share: float | None = None
 
     def render(self) -> str:
         when = f"{self.worst_at:%Y-%m-%d %H:%M} UTC" if self.worst_at else "n/a"
@@ -54,8 +61,27 @@ class Divergence:
             f"\n{self.left} vs {self.right}\n"
             f"  overlapping bars {self.overlapping}\n"
             f"  mean |diff|      {self.mean_abs_pips:.2f} pips\n"
-            f"  max  |diff|      {self.max_abs_pips:.2f} pips at {when}\n"
+            f"  max  |diff|      {self.max_abs_pips:.2f} pips at {when}\n" + self._render_ohlc()
         )
+
+    def _render_ohlc(self) -> str:
+        if len(self.ohlc_mean_abs_pips) != 4:
+            return ""
+        labels = ("open", "high", "low", "close")
+        means = ", ".join(
+            f"{label} {value:.2f}"
+            for label, value in zip(labels, self.ohlc_mean_abs_pips, strict=True)
+        )
+        p95 = ", ".join(
+            f"{label} {value:.2f}"
+            for label, value in zip(labels, self.ohlc_p95_abs_pips, strict=True)
+        )
+        flips = (
+            f"\n  barrier-touch flips {self.barrier_touch_flip_share:.2%} of overlap"
+            if self.barrier_touch_flip_share is not None
+            else ""
+        )
+        return f"  mean OHLC |diff|  {means} pips\n  p95  OHLC |diff|  {p95} pips" + flips + "\n"
 
 
 def pip_size(price: float) -> float:
@@ -64,7 +90,13 @@ def pip_size(price: float) -> float:
 
 
 def compare_series(
-    left_name: str, left: BarSeries, right_name: str, right: BarSeries
+    left_name: str,
+    left: BarSeries,
+    right_name: str,
+    right: BarSeries,
+    *,
+    barrier_pips: tuple[float, float] | None = None,
+    side: OrderSide = OrderSide.BUY,
 ) -> Divergence:
     """Compare closes on the bars both feeds carry.
 
@@ -81,8 +113,24 @@ def compare_series(
         return Divergence(left_name, right_name, 0, 0.0, 0.0, None)
 
     pip = pip_size(left.bars[-1].close)
-    diffs = [(abs(a.close - b.close) / pip, a.timestamp) for a, b in pairs]
+    fields = ("open", "high", "low", "close")
+    deltas = [
+        [abs(getattr(a, field) - getattr(b, field)) / pip for a, b in pairs] for field in fields
+    ]
+    diffs = list(zip(deltas[3], (a.timestamp for a, _ in pairs), strict=True))
     worst_value, worst_time = max(diffs, key=lambda item: item[0])
+
+    flip_share = None
+    if barrier_pips is not None:
+        stop_pips, target_pips = barrier_pips
+        if stop_pips <= 0 or target_pips <= 0:
+            raise ValueError("barrier_pips must contain positive stop and target distances")
+        flips = sum(
+            _barrier_touches(a, side, stop_pips, target_pips, pip)
+            != _barrier_touches(b, side, stop_pips, target_pips, pip)
+            for a, b in pairs
+        )
+        flip_share = flips / len(pairs)
 
     return Divergence(
         left=left_name,
@@ -91,7 +139,49 @@ def compare_series(
         mean_abs_pips=statistics.fmean(value for value, _ in diffs),
         max_abs_pips=worst_value,
         worst_at=worst_time,
+        ohlc_mean_abs_pips=tuple(statistics.fmean(values) for values in deltas),
+        ohlc_p95_abs_pips=tuple(_percentile95(values) for values in deltas),
+        barrier_touch_flip_share=flip_share,
     )
+
+
+def _percentile95(values: list[float]) -> float:
+    """Small-sample inclusive p95 without a NumPy dependency in the smoke path."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = (len(ordered) - 1) * 0.95
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
+
+
+def _barrier_touches(
+    bar,
+    side: OrderSide,
+    stop_pips: float,
+    target_pips: float,
+    pip: float,
+) -> tuple[bool, bool]:
+    stop_distance = stop_pips * pip
+    target_distance = target_pips * pip
+    if side is OrderSide.BUY:
+        return bar.low <= bar.open - stop_distance, bar.high >= bar.open + target_distance
+    return bar.high >= bar.open + stop_distance, bar.low <= bar.open - target_distance
+
+
+def gap_filler_verdict(divergence: Divergence) -> str:
+    """Return the explicit TwelveData-as-gap-filler decision for a comparison report."""
+    if divergence.overlapping == 0:
+        return "UNUSABLE: no overlapping timestamps"
+    if (
+        divergence.barrier_touch_flip_share is not None
+        and divergence.barrier_touch_flip_share > 0.01
+    ):
+        return "UNUSABLE: barrier-touch disagreement exceeds 1%"
+    if divergence.max_abs_pips > INDEPENDENT_TOLERANCE_PIPS:
+        return "UNUSABLE: OHLC divergence exceeds plausible spread"
+    return "USABLE AS GAP-FILLER: retain source tags and cross-check overlaps"
 
 
 def interpret(divergence: Divergence) -> str:

@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fixed spread used where the feed stored no bid/ask",
     )
     parser.add_argument("--slippage-pips", type=float, default=0.5)
+    parser.add_argument(
+        "--spread-ceiling-pips",
+        type=float,
+        help="Measured symbol-hour p90; refuse quoted entries above it",
+    )
     parser.add_argument("--swap-long", type=float, default=0.0, help="Account ccy per lot/night")
     parser.add_argument("--swap-short", type=float, default=0.0)
     parser.add_argument("--equity", type=float, default=10_000.0, help="Stated reference equity")
@@ -132,6 +137,7 @@ async def run(arguments: argparse.Namespace) -> int:
         ),
         history_bars=arguments.history_bars,
         max_bars_held=arguments.max_bars_held,
+        spread_ceiling_pips=arguments.spread_ceiling_pips,
     )
 
     result = replay(bars, config, quotes=quotes)
