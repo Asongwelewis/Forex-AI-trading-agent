@@ -1,5 +1,12 @@
 # FX Regime Agent — Kanban rewrite
 
+> **This file mirrors the Notion board** (`Build Tasks`, under the *FX Regime Agent* page).
+> Notion is the working copy; this is the version-controlled record of the same card set.
+>
+> **Status as of 2026-08-28.** Lane 0 is complete except 0.4. Lane 1 is complete except 1.3
+> (needs the terminal). Lane 3 is complete. Card numbering on the board uses `L<lane>.<card>`
+> prefixes in the title, and the `No.` column for execution order.
+
 Paste-ready for the Notion board. Every card has **Goal**, **Done when**, **Why**.
 Cards are ordered by dependency: nothing in a later lane is startable until its lane's
 prerequisites are green.
@@ -269,9 +276,12 @@ and whether backfill gaps can safely be plugged from the other source.
 
 # Lane 3 — The safety layer
 
-*Gate: no order is placed by any code path until every card here is green. Today
-`fxagent/permission/` is a six-line docstring and `place_order` is fully implemented and
-called by nothing. That gap is the whole lane.*
+**COMPLETE — commit `e5e7cb8`, 92 tests.** Shipped as one card on the board rather than the
+four below, because the three modules only make sense together. The four cards are kept here
+as the specification they were built to.
+
+*What remains is not code: nothing in this lane has been run against a real terminal. That is
+Lane 5 card 5.3, and it is what GATE A now waits on.*
 
 ### 3.1 — `permission/grant.py` — the state machine
 `REWRITE` — supersedes BUILD_PLAN Phase 6 Part B
@@ -558,7 +568,8 @@ feature exists. It has already produced one agent that narrates an empty list.
 With two gate markers as board-level callouts, because they are the two places the project can
 go wrong quietly:
 
-> **GATE A — no order until Lane 3 is green.**
+> **GATE A — no order until a human has watched a live smoke test (5.3).**
+> The permission layer exists now; what is missing is that nothing has called it for real.
 >
 > **GATE B — no new alpha work until Lane 2 is green.**
 
@@ -574,3 +585,27 @@ go wrong quietly:
 | 4 | Lane 3 complete, 5.1 begins. |
 | 5–8 | Lane 4 while 5.1 accumulates. 6.1–6.4 as they come up. |
 | 9 | 4.5, then 5.2, then 5.3. |
+
+
+---
+
+# Addendum — the MetaTrader 5 MCP (added 2026-08-28)
+
+### 6.1 — Set up the MT5 MCP, measurement only
+`NEW` — board card L6.1, decision in `docs/ADR-006-mt5-mcp.md`
+
+**Goal.** Read swap points, filling modes and symbol specs off the live terminal from a Claude
+Code session, without giving anything the ability to trade through it.
+
+**Done when.** Terminal build is 6060+, AI-initiated trading is set to **prohibited** (not
+"require confirmation"), Claude Code is connected, and `tests/test_mcp_is_not_a_trading_path.py`
+still passes.
+
+**Why.** MetaQuotes shipped native MCP in build 6060 on 23 Jul 2026. It exposes trading
+operations, which rules it out of the trading path three times over: it is an LLM holding an
+order ticket (hard rule 4), it is a second authorisation path beside `permission/`, and it is
+not replayable so nothing it does can appear in an expectancy interval.
+
+It is still worth having, because Lane 2 is currently blocked on facts only the terminal knows
+and every one of them costs a round trip through a human today. That is a real acceleration of
+the one lane that gates everything else.
