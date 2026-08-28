@@ -1,15 +1,18 @@
-name: Collect and analyse
+name: Collect
 
-# The hourly pass. Collector, analyst and resolver are not daemons — they wake, work for a
-# minute and exit — so a scheduler is all the "deployment" this system needs. No VPS, no
-# container to keep alive, no Windows box, £0.
+# The hourly collection pass, and only that. ADR-005 moved analysis and resolution onto the
+# desktop, where MT5 runs; what is left is keeping the Twelve Data series current while that
+# desktop is off, so a hole in the Exness series can be seen and deliberately plugged.
+#
+# The collector is not a daemon. It wakes, works for a minute and exits — so a scheduler is
+# all the "deployment" it needs. No VPS, no container to keep alive, £0.
 #
 # Four properties of GitHub's scheduler that this file is built around:
 #
 #   1. **Scheduled triggers are best-effort.** A run can be delayed 30+ minutes at peak, and
-#      can be dropped entirely. Hence :07 rather than :00, and hence nothing downstream may
-#      treat the alert timestamp as meaningful. This system does not place orders (CLAUDE.md
-#      hard rule 1), so a late recommendation is an inconvenience, never a bad fill.
+#      can be dropped entirely. Harmless for collection — the next run's overlapping re-fetch
+#      closes the hole — and one of the reasons the trading path does not live here. Hence
+#      :07 rather than :00, off the top-of-hour rush.
 #   2. **Five minutes is the floor** between runs. Irrelevant at H1; a hard limit if M5 is
 #      ever wanted.
 #   3. **Inactivity disables schedules** after 60 days without commits. health.yml warns at 45.
@@ -32,24 +35,17 @@ on:
     #   - cron: '7 21-23 * * 0'
     - cron: "7 * * * *"
   workflow_dispatch:
-    inputs:
-      stages:
-        description: Which stages to run
-        type: choice
-        default: all
-        options: [all, collect-only, analyse-only, resolve-only]
 
 # A run must never overlap its predecessor. The collector re-fetches overlapping windows and
-# upserts on `bars_unique`, and the analyst is idempotent per bar, so a double-write converges
-# rather than corrupting — but two runs racing on the same hour still burns Twelve Data credits
-# twice and can emit the same recommendation to Telegram twice.
+# upserts on `bars_unique`, so a double-write converges rather than corrupting — but two runs
+# racing on the same hour still burn Twelve Data credits twice for nothing.
 #
 # cancel-in-progress is false on purpose: killing a run mid-write to chase the newer one is
 # strictly worse than letting it finish. GitHub queues at most one pending run and discards
 # older pending ones, which is the behaviour we want — a run queued two hours ago has nothing
 # left to say.
 concurrency:
-  group: collect-and-analyse
+  group: collect
   cancel-in-progress: false
 
 permissions:
@@ -57,7 +53,7 @@ permissions:
 
 jobs:
   pipeline:
-    name: Hourly pass
+    name: Hourly collection
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -67,14 +63,10 @@ jobs:
       # Data
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       CALENDAR_USER_AGENT: ${{ vars.CALENDAR_USER_AGENT || 'fx-regime-agent/0.1' }}
-      # Alerts
+      # Alerts. Only the failure notifier uses these; the collector sends nothing.
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # Agents. All three are optional by design: if every provider is unreachable the
-      # deterministic template explanation is used and the pass completes normally.
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # No LLM keys. Narration belongs to the analysis pass, which is on the desktop now.
       # Runtime
       LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
       PYTHONUNBUFFERED: "1"
@@ -88,43 +80,31 @@ jobs:
       - name: Check required secrets
         env:
           REQUIRED_SECRETS: SUPABASE_DB_URL TWELVEDATA_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
-          OPTIONAL_SECRETS: GEMINI_API_KEY GROQ_API_KEY NVIDIA_API_KEY
         run: bash .github/scripts/check-secrets.sh
 
       - uses: ./.github/actions/setup
 
       # --------------------------------------------------------------------------------
-      # The pass. Each stage is short-lived and idempotent: running it twice for the same
-      # bar converges to one signal rather than two (hard rule 8), which is what makes a
-      # best-effort scheduler safe to build on. A skipped hour needs no catch-up path —
-      # the collector's overlapping re-fetch covers the hole on the next run.
-      # --------------------------------------------------------------------------------
+      # The pass. Short-lived and idempotent: re-running it for the same bar upserts on
+      # `bars_unique` and converges, which is what makes a best-effort scheduler safe to
+      # build on. A skipped hour needs no catch-up path.
+      #
+      # ADR-005 removed the analyse and resolve stages from this workflow. They named
+      # `fxagent.analyst` and `fxagent.resolve`, neither of which has ever existed, and the
+      # stage action's skip-with-a-warning behaviour meant the pass would have reported
+      # success while doing nothing for two of its three stages, indefinitely. That escape
+      # hatch is right for a phase about to land and wrong as a permanent state.
+      #
+      # They did not move to another workflow. Analysis and resolution now need a running MT5
+      # terminal, which a GitHub runner does not have, so they belong to `fxagent.trader` on
+      # the desktop. What is left here is the one job that genuinely wants a machine that is
+      # always on: keeping the Twelve Data series current while the desktop is off, so a hole
+      # in the Exness series can be seen and, deliberately, plugged.
       - name: Collect bars and events
         id: collect
-        if: ${{ inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'collect-only' }}
         uses: ./.github/actions/stage
         with:
           module: fxagent.collector
-
-      # Only on fresh data. An analyst run over a stale store produces a recommendation that
-      # looks current and is not — worse than no recommendation at all.
-      - name: Analyse and send recommendations
-        id: analyse
-        if: ${{ !cancelled() && steps.collect.conclusion != 'failure' && (inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'analyse-only') }}
-        uses: ./.github/actions/stage
-        with:
-          module: fxagent.analyst
-
-      # Independent of the analyst: resolving *past* signals against the bars that have since
-      # arrived is bookkeeping, and skipping it because today's analysis failed just compounds
-      # the backlog. It does need the collector to have succeeded — with no new bars there is
-      # nothing to resolve against.
-      - name: Resolve open signals
-        id: resolve
-        if: ${{ !cancelled() && steps.collect.conclusion != 'failure' && (inputs.stages == null || inputs.stages == 'all' || inputs.stages == 'resolve-only') }}
-        uses: ./.github/actions/stage
-        with:
-          module: fxagent.resolve
 
       # --------------------------------------------------------------------------------
       # A scheduled job that silently stops firing is the main operational risk here, so the
@@ -138,11 +118,11 @@ jobs:
           bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
           text: |
-            ❌ FX agent hourly pass FAILED
+            ❌ FX agent hourly collection FAILED
 
             collect : ${{ steps.collect.conclusion || 'not reached' }}
-            analyse : ${{ steps.analyse.conclusion || 'not reached' }}
-            resolve : ${{ steps.resolve.conclusion || 'not reached' }}
 
-            No recommendation was sent for this hour.
+            The stored series has a hole for this hour. The collector re-fetches an
+            overlapping window, so a single failure self-heals on the next run; repeated
+            failures do not.
             Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

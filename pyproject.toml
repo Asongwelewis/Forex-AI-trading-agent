@@ -75,6 +75,11 @@ dev = [
     # eyeballed is a UI with no tests.
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Reads .github/workflows/*.yml in tests/test_workflows_name_real_modules.py. Declared
+    # rather than leaned on transitively: that test guards against a stage silently doing
+    # nothing, and it uses importorskip, so an undeclared parser would make it skip itself
+    # into exactly the silence it exists to detect.
+    "pyyaml>=6.0",
 ]
 
 [build-system]
