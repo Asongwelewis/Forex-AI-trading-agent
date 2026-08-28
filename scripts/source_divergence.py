@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from fxagent.adapters.base import OrderSide
 from fxagent.adapters.divergence import compare_series, gap_filler_verdict, interpret
@@ -24,6 +27,7 @@ def _day(value: str) -> datetime:
 
 
 async def run(args: argparse.Namespace) -> int:
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     database = Database.from_env()
     try:
         async with database.session() as session:
@@ -54,6 +58,15 @@ async def run(args: argparse.Namespace) -> int:
         barrier_pips=barrier,
         side=OrderSide(args.side),
     )
+    if not report.overlapping:
+        for name, series in ((args.exness_source, exness), (args.twelvedata_source, twelve)):
+            if series.bars:
+                print(
+                    f"{name}: {len(series)} bars from {series.bars[0].timestamp.isoformat()} "
+                    f"to {series.bars[-1].timestamp.isoformat()}"
+                )
+            else:
+                print(f"{name}: no bars in requested range")
     print(report.render(), end="")
     print(interpret(report))
     print(f"  gap-filler verdict: {gap_filler_verdict(report)}")
